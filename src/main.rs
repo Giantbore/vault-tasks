@@ -49,14 +49,54 @@ impl DefaultDue {
     }
 }
 
-/// macOS system sounds in /System/Library/Sounds
-const SOUNDS: [&str; 14] = [
-    "Glass", "Ping", "Pop", "Tink", "Purr", "Hero", "Bottle", "Blow", "Frog", "Funk", "Morse",
-    "Submarine", "Sosumi", "Basso",
-];
+const SOUND_EXTS: [&str; 6] = ["aiff", "aif", "wav", "mp3", "m4a", "caf"];
+const SYSTEM_SOUNDS: &str = "/System/Library/Sounds";
+
+/// Your own sounds: ~/Library/Sounds (macOS also offers these as alert sounds).
+fn user_sounds_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/Sounds"))
+}
+
+fn sounds_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| SOUND_EXTS.contains(&e.to_lowercase().as_str()))
+        })
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+/// (your sounds, system sounds)
+fn list_sounds() -> (Vec<String>, Vec<String>) {
+    let mine = user_sounds_dir().map(|d| sounds_in(&d)).unwrap_or_default();
+    (mine, sounds_in(std::path::Path::new(SYSTEM_SOUNDS)))
+}
+
+/// Finds a sound by name, preferring your own folder over the system one.
+fn find_sound(name: &str) -> Option<PathBuf> {
+    let dirs = user_sounds_dir().into_iter().chain([PathBuf::from(SYSTEM_SOUNDS)]);
+    for dir in dirs {
+        for ext in SOUND_EXTS {
+            let p = dir.join(format!("{name}.{ext}"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
 
 fn play_sound(name: &str) {
-    let path = format!("/System/Library/Sounds/{name}.aiff");
+    let Some(path) = find_sound(name) else { return };
     // Wait on a background thread so the process is reaped without blocking the UI.
     std::thread::spawn(move || {
         let _ = std::process::Command::new("afplay").arg(path).status();
@@ -655,8 +695,18 @@ impl App {
                     .selected_text(self.cfg.chime.as_deref().unwrap_or("Off"))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.cfg.chime, None, "Off");
-                        for s in SOUNDS {
-                            ui.selectable_value(&mut self.cfg.chime, Some(s.to_string()), s);
+                        let (mine, system) = list_sounds();
+                        if !mine.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("Your sounds").size(11.0).color(SUBTLE));
+                            for s in mine {
+                                ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
+                            }
+                            ui.separator();
+                            ui.label(RichText::new("macOS").size(11.0).color(SUBTLE));
+                        }
+                        for s in system {
+                            ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
                         }
                     });
                 if self.cfg.chime != before {
@@ -668,6 +718,19 @@ impl App {
                 if let Some(s) = &self.cfg.chime {
                     if ui.button("▶ Play").clicked() {
                         play_sound(s);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Add your own: drop .aiff, .wav, .mp3, .m4a or .caf files into ~/Library/Sounds.")
+                        .size(12.0)
+                        .color(SUBTLE),
+                );
+                if ui.small_button("Open folder").clicked() {
+                    if let Some(dir) = user_sounds_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::process::Command::new("open").arg(dir).spawn();
                     }
                 }
             });
