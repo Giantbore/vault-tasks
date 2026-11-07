@@ -62,6 +62,7 @@ cargo test     # run unit tests
 - `src/main.rs` contains the app window, views and settings
 - `src/menu.rs` builds the macOS menu bar
 - `src/fonts.rs` loads the bundled fonts
+- `assets/icon.svg` is the app icon source. After editing it, run `cargo run --example make_icon` to regenerate `assets/AppIcon.icns`
 
 ## Credits
 Built with [egui](https://github.com/emilk/egui). Bundled fonts are Manrope and Source Serif 4, both under the SIL Open Font License (see `assets/fonts/README.md`).

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Tile: macOS icon grid (824px body, 100px margin) -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#2a2a30"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#3b3b44" stroke-width="6"/>
+  <!-- Checkbox outline -->
+  <rect x="232" y="232" width="560" height="560" rx="110" fill="none" stroke="#9fd0f5" stroke-width="40"/>
+  <!-- Faceted crystal check -->
+  <g transform="translate(512,525) scale(0.68) translate(-535,-532)">
+    <polygon points="310,520 350,480 455,585 455,665" fill="#bfe0f8"/>
+    <polygon points="270,560 310,520 455,665 455,745" fill="#6fb2e8"/>
+    <polygon points="455,585 720,320 760,360 455,665" fill="#e6f4fd"/>
+    <polygon points="455,665 760,360 800,400 455,745" fill="#8ec6f0"/>
+    <polygon points="455,665 610,510 455,745" fill="#4b92d8"/>
+  </g>
+</svg>
