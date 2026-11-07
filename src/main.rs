@@ -27,6 +27,42 @@ const STAR: Color32 = Color32::from_rgb(250, 190, 20);
 const SELECTED: Color32 = Color32::from_rgb(222, 222, 227);
 const HOVER: Color32 = Color32::from_rgb(233, 233, 237);
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+enum DefaultDue {
+    #[default]
+    None,
+    Today,
+    DaysOut,
+    EndOfWeek,
+}
+
+impl DefaultDue {
+    const ALL: [DefaultDue; 4] = [DefaultDue::None, DefaultDue::Today, DefaultDue::DaysOut, DefaultDue::EndOfWeek];
+
+    fn label(self) -> &'static str {
+        match self {
+            DefaultDue::None => "No due date",
+            DefaultDue::Today => "Today",
+            DefaultDue::DaysOut => "A number of days out",
+            DefaultDue::EndOfWeek => "End of week (Friday)",
+        }
+    }
+}
+
+/// macOS system sounds in /System/Library/Sounds
+const SOUNDS: [&str; 14] = [
+    "Glass", "Ping", "Pop", "Tink", "Purr", "Hero", "Bottle", "Blow", "Frog", "Funk", "Morse",
+    "Submarine", "Sosumi", "Basso",
+];
+
+fn play_sound(name: &str) {
+    let path = format!("/System/Library/Sounds/{name}.aiff");
+    // Wait on a background thread so the process is reaped without blocking the UI.
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("afplay").arg(path).status();
+    });
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Config {
@@ -41,6 +77,10 @@ struct Config {
     font: BodyFont,
     /// Index into fonts::SIZES
     text_size: usize,
+    default_due: DefaultDue,
+    default_due_days: u32,
+    /// Sound played when a task is completed; None = off.
+    chime: Option<String>,
 }
 
 impl Default for Config {
@@ -52,6 +92,25 @@ impl Default for Config {
             excluded: Vec::new(),
             font: BodyFont::default(),
             text_size: fonts::DEFAULT_SIZE,
+            default_due: DefaultDue::None,
+            default_due_days: 3,
+            chime: Some("Glass".into()),
+        }
+    }
+}
+
+impl Config {
+    fn default_due_date(&self, today: NaiveDate) -> Option<NaiveDate> {
+        match self.default_due {
+            DefaultDue::None => None,
+            DefaultDue::Today => Some(today),
+            DefaultDue::DaysOut => Some(today + chrono::Days::new(self.default_due_days as u64)),
+            DefaultDue::EndOfWeek => {
+                // Upcoming Friday (today if it is Friday; next week's on Sat/Sun).
+                let wd = today.weekday().num_days_from_monday() as u64;
+                let days = if wd <= 4 { 4 - wd } else { 11 - wd };
+                Some(today + chrono::Days::new(days))
+            }
         }
     }
 }
@@ -156,6 +215,7 @@ impl App {
             focus_new: false,
             menu: menu::MenuBar::install(&cc.egui_ctx),
         };
+        app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
         app
     }
@@ -233,7 +293,11 @@ impl App {
     fn run(&mut self, action: Action) {
         let today = Local::now().date_naive();
         let result = match &action {
-            Action::Complete(t) => tasks::complete_task(t),
+            Action::Complete(t) => tasks::complete_task(t).inspect(|_| {
+                if let Some(s) = &self.cfg.chime {
+                    play_sound(s);
+                }
+            }),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
             Action::Open(t) => {
                 open_in_obsidian(t);
@@ -261,7 +325,7 @@ impl App {
         match tasks::add_task(&root, &self.draft.text, self.draft.due, sched) {
             Ok(()) => {
                 self.draft.text.clear();
-                self.draft.due = None;
+                self.draft.due = self.cfg.default_due_date(today);
                 self.error = None;
                 self.focus_new = true;
                 self.rescan();
@@ -553,6 +617,62 @@ impl App {
             });
 
             ui.add_space(20.0);
+            section(ui, "New tasks", "");
+            let today = Local::now().date_naive();
+            let before = (self.cfg.default_due, self.cfg.default_due_days);
+            ui.horizontal(|ui| {
+                ui.label("Default due date");
+                egui::ComboBox::from_id_salt("default_due")
+                    .width(200.0)
+                    .selected_text(self.cfg.default_due.label())
+                    .show_ui(ui, |ui| {
+                        for d in DefaultDue::ALL {
+                            ui.selectable_value(&mut self.cfg.default_due, d, d.label());
+                        }
+                    });
+                if self.cfg.default_due == DefaultDue::DaysOut {
+                    ui.add(egui::DragValue::new(&mut self.cfg.default_due_days).range(1..=365).speed(0.2));
+                    ui.label(if self.cfg.default_due_days == 1 { "day" } else { "days" });
+                }
+            });
+            if let Some(d) = self.cfg.default_due_date(today) {
+                ui.label(RichText::new(format!("New tasks will be due {}.", d.format("%A, %b %-d"))).size(12.0).color(SUBTLE));
+            }
+            if before != (self.cfg.default_due, self.cfg.default_due_days) {
+                if self.draft.text.trim().is_empty() {
+                    self.draft.due = self.cfg.default_due_date(today);
+                }
+                changed = true;
+            }
+
+            ui.add_space(20.0);
+            section(ui, "Sound", "");
+            ui.horizontal(|ui| {
+                ui.label("Completion chime");
+                let before = self.cfg.chime.clone();
+                egui::ComboBox::from_id_salt("chime")
+                    .width(140.0)
+                    .selected_text(self.cfg.chime.as_deref().unwrap_or("Off"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.cfg.chime, None, "Off");
+                        for s in SOUNDS {
+                            ui.selectable_value(&mut self.cfg.chime, Some(s.to_string()), s);
+                        }
+                    });
+                if self.cfg.chime != before {
+                    if let Some(s) = &self.cfg.chime {
+                        play_sound(s);
+                    }
+                    changed = true;
+                }
+                if let Some(s) = &self.cfg.chime {
+                    if ui.button("▶ Play").clicked() {
+                        play_sound(s);
+                    }
+                }
+            });
+
+            ui.add_space(20.0);
             section(ui, "Display", "");
             ui.horizontal(|ui| {
                 ui.label("Font");
@@ -818,4 +938,30 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Vault Tasks", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn default_due_dates() {
+        let mut c = Config::default();
+        let sat = d("2026-11-07");
+        assert_eq!(c.default_due_date(sat), None);
+        c.default_due = DefaultDue::Today;
+        assert_eq!(c.default_due_date(sat), Some(sat));
+        c.default_due = DefaultDue::DaysOut;
+        c.default_due_days = 3;
+        assert_eq!(c.default_due_date(sat), Some(d("2026-11-10")));
+        c.default_due = DefaultDue::EndOfWeek;
+        assert_eq!(c.default_due_date(sat), Some(d("2026-11-13"))); // Sat -> next Fri
+        assert_eq!(c.default_due_date(d("2026-11-08")), Some(d("2026-11-13"))); // Sun
+        assert_eq!(c.default_due_date(d("2026-11-09")), Some(d("2026-11-13"))); // Mon
+        assert_eq!(c.default_due_date(d("2026-11-13")), Some(d("2026-11-13"))); // Fri
+    }
 }
