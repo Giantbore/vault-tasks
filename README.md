@@ -21,7 +21,7 @@ Build and install the app into `~/Applications`:
 ```bash
 ./bundle.sh --install
 ```
-Run `./bundle.sh` without `--install` to build `dist/Vault Tasks.app` only. Run the same command again after pulling changes to update the app.
+Run `./bundle.sh` without `--install` to build `target/bundle.noindex/Vault Tasks.app` only (the `.noindex` folder keeps Spotlight from listing build copies). Run the same command again after pulling changes to update the app.
 
 ## First run
 The app looks for vaults in Obsidian's iCloud folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents`). Vaults stored anywhere else can be added in **Settings → Vault folders**. Settings are saved to `~/Library/Application Support/vault-tasks/config.json`.
