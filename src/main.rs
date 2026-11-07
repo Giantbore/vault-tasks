@@ -997,7 +997,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([640.0, 360.0])
-            .with_title("Vault Tasks"),
+            .with_title("Vault Tasks")
+            // Without this eframe swaps in its default icon in the Dock.
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("icon.png")),
         ..Default::default()
     };
     eframe::run_native("Vault Tasks", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
