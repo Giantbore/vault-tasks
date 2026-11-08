@@ -281,6 +281,7 @@ struct App {
     menu: menu::MenuBar,
     range: Range,
     last_completed: Option<LastCompleted>,
+    _logo: egui::TextureHandle,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -308,6 +309,7 @@ impl App {
             menu: menu::MenuBar::install(&cc.egui_ctx),
             range: Range::Week,
             last_completed: None,
+            _logo: load_logo(&cc.egui_ctx),
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -492,15 +494,15 @@ impl App {
         let today_count = today_list.len();
         let today_overdue = today_list.iter().filter(|t| t.due.is_some_and(|d| d <= today)).count();
 
-        if side_item(ui, "📥", BLUE, "All", all_count, overdue, self.view == View::All).clicked() {
+        if side_item(ui, Glyph::Logo, "All", all_count, overdue, self.view == View::All).clicked() {
             self.view = View::All;
         }
-        if side_item(ui, "★", STAR, "Today", today_count, today_overdue, self.view == View::Today).clicked() {
+        if side_item(ui, Glyph::Text("★", STAR), "Today", today_count, today_overdue, self.view == View::Today).clicked() {
             self.view = View::Today;
         }
         ui.add_space(10.0);
         let done_today = self.completed_in(Range::Today, today).len();
-        if side_item(ui, "✔", GREEN, "Completed", done_today, 0, self.view == View::Completed)
+        if side_item(ui, Glyph::Done, "Completed", done_today, 0, self.view == View::Completed)
             .on_hover_text("Completed today")
             .clicked()
         {
@@ -515,7 +517,7 @@ impl App {
                 let name = vault_name(&v);
                 let count = self.tasks_for(&View::Vault(name.clone()), today).len();
                 let sel = self.view == View::Vault(name.clone());
-                if side_item(ui, "◈", SUBTLE, &name, count, 0, sel).clicked() {
+                if side_item(ui, Glyph::Text("◈", SUBTLE), &name, count, 0, sel).clicked() {
                     self.view = View::Vault(name);
                 }
             }
@@ -547,15 +549,15 @@ impl App {
     // ---------- Main list ----------
 
     fn header(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
-        let (icon, color, title, sub) = match &self.view {
-            View::All => ("📥", BLUE, "All Tasks".to_string(), None),
-            View::Today => ("★", STAR, "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
-            View::Completed => ("✔", GREEN, "Completed".to_string(), None),
-            View::Vault(v) => ("◈", SUBTLE, v.clone(), None),
-            View::Settings => ("⚙", SUBTLE, "Settings".to_string(), None),
+        let (icon, title, sub) = match &self.view {
+            View::All => (Glyph::Logo, "All Tasks".to_string(), None),
+            View::Today => (Glyph::Text("★", STAR), "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
+            View::Completed => (Glyph::Done, "Completed".to_string(), None),
+            View::Vault(v) => (Glyph::Text("◈", SUBTLE), v.clone(), None),
+            View::Settings => (Glyph::Text("⚙", SUBTLE), "Settings".to_string(), None),
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(icon).size(26.0).color(color));
+            glyph(ui, 24.0, icon);
             ui.label(RichText::new(title).size(28.0).family(fonts::heading()).color(TEXT));
         });
         if let Some(s) = sub {
@@ -917,15 +919,31 @@ impl App {
             changed |= ui.checkbox(&mut self.cfg.hide_future_start, "Hide tasks whose start date (🛫) is in the future").changed();
 
             ui.add_space(20.0);
-            section(ui, "Jump to line", "Clicking a task opens its note at the task's line when the free Advanced URI plugin is installed and enabled in that vault (Obsidian → Settings → Community plugins → Browse → \"Advanced URI\"). Otherwise the note opens at the top.");
-            for v in &self.cfg.vaults {
-                let ok = has_advanced_uri(v);
-                ui.label(RichText::new(format!(
-                    "{}  {}",
-                    if ok { "✔" } else { "✖" },
-                    format!("{}: {}", vault_name(v), if ok { "Advanced URI installed" } else { "Advanced URI not installed" })
-                ))
-                .color(if ok { GREEN } else { SUBTLE }));
+            section(
+                ui,
+                "Obsidian plugins",
+                "Install these from Obsidian → Settings → Community plugins → Browse, then enable them, in each vault.",
+            );
+            let plugins = [
+                (TASKS_PLUGIN, "Tasks", "Recommended. Shows and queries these tasks in Obsidian and creates the next copy of 🔁 recurring tasks."),
+                (ADV_URI_PLUGIN, "Advanced URI", "Optional. Lets a click open the note at the task's line."),
+            ];
+            for (id, name, why) in plugins {
+                ui.add_space(4.0);
+                ui.label(RichText::new(name).family(fonts::bold()).color(TEXT));
+                ui.label(RichText::new(why).size(12.0).color(SUBTLE));
+                for v in &self.cfg.vaults {
+                    let (mark, state) = match plugin_state(v, id) {
+                        PluginState::Enabled => (Glyph::Done, "installed and enabled"),
+                        PluginState::InstalledOff => (Glyph::Partial, "installed but not enabled"),
+                        PluginState::Missing => (Glyph::Missing, "not installed"),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        glyph(ui, 13.0, mark);
+                        ui.label(RichText::new(format!("{}: {state}", vault_name(v))).color(TEXT));
+                    });
+                }
             }
 
             ui.add_space(20.0);
@@ -957,10 +975,78 @@ fn section(ui: &mut egui::Ui, title: &str, sub: &str) {
     ui.add_space(6.0);
 }
 
+/// Icons used in the sidebar and page headers.
+#[derive(Clone, Copy)]
+enum Glyph<'a> {
+    Text(&'a str, Color32),
+    /// The app logo (assets/icon-small.png).
+    Logo,
+    /// Green circle with a white check.
+    Done,
+    /// Red circle with a white ✕.
+    Missing,
+    /// Amber circle with a white dot.
+    Partial,
+}
+
+static LOGO: std::sync::OnceLock<egui::TextureId> = std::sync::OnceLock::new();
+
+fn load_logo(ctx: &egui::Context) -> egui::TextureHandle {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-small.png")).expect("icon-small.png");
+    let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    let opts = egui::TextureOptions {
+        mipmap_mode: Some(egui::TextureFilter::Linear),
+        ..egui::TextureOptions::LINEAR
+    };
+    let handle = ctx.load_texture("logo", img, opts);
+    let _ = LOGO.set(handle.id());
+    handle
+}
+
+/// Paints a glyph centered at `c`, `size` points tall.
+fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
+    match g {
+        Glyph::Text(t, color) => {
+            p.text(c, Align2::CENTER_CENTER, t, FontId::proportional(size), color);
+        }
+        Glyph::Logo => {
+            if let Some(id) = LOGO.get() {
+                // The logo has a ~10% transparent margin, so draw it a bit larger.
+                let r = egui::Rect::from_center_size(c, vec2(size * 1.25, size * 1.25));
+                p.image(*id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        }
+        Glyph::Done => {
+            let r = size * 0.5;
+            p.circle_filled(c, r, GREEN);
+            let pts = vec![c + vec2(-0.45 * r, 0.02 * r), c + vec2(-0.12 * r, 0.34 * r), c + vec2(0.46 * r, -0.30 * r)];
+            p.add(egui::Shape::line(pts, Stroke::new((r * 0.24).max(1.5), Color32::WHITE)));
+        }
+        Glyph::Missing => {
+            let r = size * 0.5;
+            p.circle_filled(c, r, RED);
+            let k = r * 0.38;
+            let st = Stroke::new((r * 0.22).max(1.5), Color32::WHITE);
+            p.line_segment([c + vec2(-k, -k), c + vec2(k, k)], st);
+            p.line_segment([c + vec2(-k, k), c + vec2(k, -k)], st);
+        }
+        Glyph::Partial => {
+            let r = size * 0.5;
+            p.circle_filled(c, r, Color32::from_rgb(222, 140, 20));
+            p.circle_filled(c, r * 0.3, Color32::WHITE);
+        }
+    }
+}
+
+/// Allocates space in a layout and paints a glyph there.
+fn glyph(ui: &mut egui::Ui, size: f32, g: Glyph) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size * 1.25, size * 1.25), Sense::hover());
+    paint_glyph(ui.painter(), rect.center(), size, g);
+}
+
 fn side_item(
     ui: &mut egui::Ui,
-    icon: &str,
-    icon_color: Color32,
+    icon: Glyph,
     label: &str,
     count: usize,
     badge: usize,
@@ -974,7 +1060,7 @@ fn side_item(
         p.rect_filled(rect, CornerRadius::same(6), HOVER);
     }
     let y = rect.center().y;
-    p.text(egui::pos2(rect.left() + 10.0, y), Align2::LEFT_CENTER, icon, FontId::proportional(16.0), icon_color);
+    paint_glyph(p, egui::pos2(rect.left() + 19.0, y), 16.0, icon);
     p.text(egui::pos2(rect.left() + 36.0, y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), TEXT);
     let mut right = rect.right() - 10.0;
     if count > 0 {
@@ -1118,15 +1204,44 @@ fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) -> egui::Respons
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Change due date")
 }
 
+// Due date menu layout: the calendar is 7 cells wide and everything else matches it.
+const CAL_CELL: f32 = 32.0;
+const CAL_GAP: f32 = 2.0;
+const MENU_W: f32 = CAL_CELL * 7.0 + CAL_GAP * 6.0;
+const DIVIDER: Color32 = Color32::from_rgb(222, 222, 228);
+
+/// Full-width menu row with a label on the left and an optional hint on the right.
+fn menu_row(ui: &mut egui::Ui, label: &str, hint: &str, color: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(MENU_W, 28.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, CornerRadius::same(6), HOVER);
+    }
+    let y = rect.center().y;
+    p.text(egui::pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), color);
+    if !hint.is_empty() {
+        p.text(egui::pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, hint, FontId::proportional(13.0), SUBTLE);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Divider spanning the full menu width.
+fn menu_divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(MENU_W, 11.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, DIVIDER));
+}
+
 /// Due date menu opened from a task's date chip (or calendar button).
 fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action> {
     let mut out = None;
     egui::Popup::menu(resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_min_width(230.0);
-            ui.set_max_width(230.0);
-            ui.label(RichText::new("Due date").size(12.0).family(fonts::bold()).color(SUBTLE));
+            ui.set_width(MENU_W);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.add_space(2.0);
+            ui.label(RichText::new("  Due date").size(12.0).family(fonts::bold()).color(SUBTLE));
+            ui.add_space(2.0);
             let quick = [
                 ("Today", today),
                 ("Tomorrow", today + chrono::Days::new(1)),
@@ -1135,22 +1250,19 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
                 ("In 1 week", today + chrono::Days::new(7)),
             ];
             for (label, d) in quick {
-                let b = egui::Button::new(RichText::new(label).color(TEXT))
-                    .right_text(RichText::new(d.format("%a %b %-d").to_string()).color(SUBTLE))
-                    .frame(false);
-                if ui.add(b).clicked() {
+                if menu_row(ui, label, &d.format("%a %b %-d").to_string(), TEXT).clicked() {
                     out = Some(Action::SetDue(t.clone(), Some(d)));
                     ui.close();
                 }
             }
-            ui.separator();
+            menu_divider(ui);
             if let Some(d) = calendar(ui, resp.id.with("cal"), t.due, today) {
                 out = Some(Action::SetDue(t.clone(), Some(d)));
                 ui.close();
             }
             if t.due.is_some() {
-                ui.separator();
-                if ui.add(egui::Button::new(RichText::new("Remove due date").color(RED)).frame(false)).clicked() {
+                menu_divider(ui);
+                if menu_row(ui, "Remove due date", "", RED).clicked() {
                     out = Some(Action::SetDue(t.clone(), None));
                     ui.close();
                 }
@@ -1159,71 +1271,99 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
     out
 }
 
-/// Month calendar. Returns the clicked day.
+/// Month calendar, painted on a fixed grid. Returns the clicked day.
 fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today: NaiveDate) -> Option<NaiveDate> {
     let start = selected.unwrap_or(today);
-    let mut month: NaiveDate = ui.data_mut(|d| {
-        *d.get_temp_mut_or_insert_with(id, || start.with_day(1).unwrap())
-    });
+    let mut month: NaiveDate = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || start.with_day(1).unwrap()));
     let mut picked = None;
-    ui.horizontal(|ui| {
-        if ui.add(egui::Button::new("‹").frame(false)).clicked() {
-            month = (month - chrono::Days::new(1)).with_day(1).unwrap();
+
+    // Header: ‹  Month Year  ›
+    let (head, _) = ui.allocate_exact_size(vec2(MENU_W, 30.0), Sense::hover());
+    ui.painter().text(
+        head.center(),
+        Align2::CENTER_CENTER,
+        month.format("%B %Y").to_string(),
+        FontId::new(14.0, fonts::bold()),
+        TEXT,
+    );
+    for (dx, arrow, forward) in [(0.0, "‹", false), (MENU_W - CAL_CELL, "›", true)] {
+        let r = egui::Rect::from_min_size(egui::pos2(head.left() + dx, head.top() + 1.0), vec2(CAL_CELL, 28.0));
+        let resp = ui.interact(r, id.with(arrow), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            ui.painter().rect_filled(r, CornerRadius::same(6), HOVER);
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.add(egui::Button::new("›").frame(false)).clicked() {
-                month = month + chrono::Months::new(1);
-            }
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(month.format("%B %Y").to_string()).family(fonts::bold()).color(TEXT));
-            });
-        });
-    });
-    egui::Grid::new(id.with("grid")).spacing([2.0, 2.0]).show(ui, |ui| {
-        for w in ["M", "T", "W", "T", "F", "S", "S"] {
-            ui.centered_and_justified(|ui| ui.label(RichText::new(w).size(11.0).color(SUBTLE)));
-        }
-        ui.end_row();
-        let offset = month.weekday().num_days_from_monday();
-        for _ in 0..offset {
-            ui.label("");
-        }
-        let mut col = offset;
-        let mut day = month;
-        while day.month() == month.month() {
-            let is_sel = Some(day) == selected;
-            let color = if is_sel {
-                Color32::WHITE
-            } else if day == today {
-                BLUE
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, arrow, FontId::proportional(18.0), TEXT);
+        if resp.clicked() {
+            month = if forward {
+                month + chrono::Months::new(1)
             } else {
-                TEXT
+                (month - chrono::Days::new(1)).with_day(1).unwrap()
             };
-            let mut b = egui::Button::new(RichText::new(day.day().to_string()).size(12.5).color(color))
-                .min_size(vec2(28.0, 24.0))
-                .corner_radius(CornerRadius::same(5));
-            b = if is_sel { b.fill(BLUE) } else { b.frame(false) };
-            if ui.add(b).clicked() {
-                picked = Some(day);
-            }
-            col += 1;
-            if col % 7 == 0 {
-                ui.end_row();
-            }
-            day = day + chrono::Days::new(1);
         }
-    });
+    }
+
+    // Weekday letters + day cells.
+    let offset = month.weekday().num_days_from_monday() as usize;
+    let days_in_month = (month + chrono::Months::new(1) - month).num_days() as usize;
+    let weeks = (offset + days_in_month).div_ceil(7);
+    let row_h = 28.0;
+    let (grid, _) = ui.allocate_exact_size(vec2(MENU_W, 22.0 + weeks as f32 * (row_h + CAL_GAP)), Sense::hover());
+    let cell = |col: usize, row: f32, h: f32| {
+        egui::Rect::from_min_size(
+            egui::pos2(grid.left() + col as f32 * (CAL_CELL + CAL_GAP), grid.top() + row),
+            vec2(CAL_CELL, h),
+        )
+    };
+    for (i, w) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
+        ui.painter().text(cell(i, 0.0, 20.0).center(), Align2::CENTER_CENTER, *w, FontId::proportional(11.5), SUBTLE);
+    }
+    for n in 0..days_in_month {
+        let day = month + chrono::Days::new(n as u64);
+        let slot = offset + n;
+        let r = cell(slot % 7, 22.0 + (slot / 7) as f32 * (row_h + CAL_GAP), row_h);
+        let resp = ui.interact(r, id.with(n), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let is_sel = Some(day) == selected;
+        let p = ui.painter();
+        if is_sel {
+            p.rect_filled(r, CornerRadius::same(6), BLUE);
+        } else if resp.hovered() {
+            p.rect_filled(r, CornerRadius::same(6), HOVER);
+        }
+        let color = if is_sel { Color32::WHITE } else if day == today { BLUE } else { TEXT };
+        p.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(13.0), color);
+        if resp.clicked() {
+            picked = Some(day);
+        }
+    }
     ui.data_mut(|d| d.insert_temp(id, month));
     picked
 }
 
-/// True if the vault has the Advanced URI community plugin installed and enabled,
-/// which lets us open a note at a specific line.
-fn has_advanced_uri(vault_root: &std::path::Path) -> bool {
+#[derive(PartialEq)]
+enum PluginState {
+    Enabled,
+    InstalledOff,
+    Missing,
+}
+
+/// Checks a community plugin in a vault: installed (folder exists) and enabled
+/// (listed in community-plugins.json).
+fn plugin_state(vault_root: &std::path::Path, id: &str) -> PluginState {
     let obs = vault_root.join(".obsidian");
-    obs.join("plugins/obsidian-advanced-uri").is_dir()
-        && std::fs::read_to_string(obs.join("community-plugins.json"))
-            .is_ok_and(|s| s.contains("\"obsidian-advanced-uri\""))
+    if !obs.join("plugins").join(id).is_dir() {
+        return PluginState::Missing;
+    }
+    let enabled = std::fs::read_to_string(obs.join("community-plugins.json"))
+        .is_ok_and(|s| s.contains(&format!("\"{id}\"")));
+    if enabled { PluginState::Enabled } else { PluginState::InstalledOff }
+}
+
+const TASKS_PLUGIN: &str = "obsidian-tasks-plugin";
+const ADV_URI_PLUGIN: &str = "obsidian-advanced-uri";
+
+/// Advanced URI lets us open a note at a specific line.
+fn has_advanced_uri(vault_root: &std::path::Path) -> bool {
+    plugin_state(vault_root, ADV_URI_PLUGIN) == PluginState::Enabled
 }
 
 fn open_in_obsidian(t: &Task) {
@@ -1326,7 +1466,7 @@ impl eframe::App for App {
                                     if text.chars().count() > 48 {
                                         text = text.chars().take(47).collect::<String>() + "…";
                                     }
-                                    ui.label(RichText::new("✔").color(GREEN));
+                                    glyph(ui, 14.0, Glyph::Done);
                                     ui.label(RichText::new(format!("Completed \"{text}\"")).color(Color32::WHITE));
                                     ui.add_space(8.0);
                                     if ui

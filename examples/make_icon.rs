@@ -1,5 +1,6 @@
 //! Renders assets/icon.svg into assets/AppIcon.icns (app bundle icon)
-//! and assets/icon.png (Dock icon set by the app at runtime).
+//! assets/icon.png (Dock icon set by the app at runtime) and
+//! assets/icon-small.png (logo used inside the app's sidebar and headers).
 //! Run after editing the SVG: `cargo run --example make_icon`
 use resvg::{tiny_skia, usvg};
 use std::process::Command;
@@ -28,6 +29,9 @@ fn main() {
             pixmap.save_png(format!("{iconset}/{name}")).unwrap();
             if px == 512 {
                 pixmap.save_png(format!("{root}/assets/icon.png")).unwrap();
+            }
+            if px == 128 && scale == 1 {
+                pixmap.save_png(format!("{root}/assets/icon-small.png")).unwrap();
             }
         }
     }
