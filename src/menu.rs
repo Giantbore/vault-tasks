@@ -15,6 +15,7 @@ pub enum Cmd {
     Refresh,
     ShowAll,
     ShowToday,
+    ShowCompleted,
     GroupByFile,
     Bigger,
     Smaller,
@@ -46,6 +47,7 @@ impl MenuBar {
         let refresh = item("Refresh", cmd_key(Code::KeyR), Cmd::Refresh);
         let all = item("All Tasks", cmd_key(Code::Digit1), Cmd::ShowAll);
         let today = item("Today", cmd_key(Code::Digit2), Cmd::ShowToday);
+        let completed = item("Completed", cmd_key(Code::Digit3), Cmd::ShowCompleted);
         let bigger = item("Bigger Text", cmd_key(Code::Equal), Cmd::Bigger);
         let smaller = item("Smaller Text", cmd_key(Code::Minus), Cmd::Smaller);
         let actual = item("Normal Text Size", cmd_key(Code::Digit0), Cmd::ActualSize);
@@ -88,7 +90,7 @@ impl MenuBar {
         let view_menu = Submenu::with_items(
             "View",
             true,
-            &[&all, &today, &sep(), &group_by_file, &sep(), &bigger, &smaller, &actual],
+            &[&all, &today, &completed, &sep(), &group_by_file, &sep(), &bigger, &smaller, &actual],
         )
         .expect("view menu");
         let window_menu = Submenu::with_items(

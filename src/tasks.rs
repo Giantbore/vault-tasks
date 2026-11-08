@@ -50,6 +50,10 @@ pub struct Task {
     pub priority: Priority,
     pub recurrence: Option<String>,
     pub in_progress: bool,
+    /// Checked off (`[x]`).
+    pub completed: bool,
+    /// Done date (`✅ YYYY-MM-DD`).
+    pub done: Option<NaiveDate>,
 }
 
 impl Task {
@@ -80,8 +84,9 @@ pub fn parse_line(line: &str) -> Option<(char, String)> {
 
 fn build_task(vault: &str, root: &Path, file: &Path, line_no: usize, line: &str) -> Option<Task> {
     let (status, body) = parse_line(line)?;
-    // Open = space; in progress = '/'. Everything else (x, X, -, >, etc.) is treated as closed.
-    if status != ' ' && status != '/' {
+    // Open = space, in progress = '/', completed = x/X. Others (cancelled '-', '>', etc.) are skipped.
+    let completed = matches!(status, 'x' | 'X');
+    if !completed && status != ' ' && status != '/' {
         return None;
     }
     if body.is_empty() {
@@ -90,12 +95,14 @@ fn build_task(vault: &str, root: &Path, file: &Path, line_no: usize, line: &str)
     let mut due = None;
     let mut scheduled = None;
     let mut start = None;
+    let mut done = None;
     for c in DATE_RE.captures_iter(&body) {
         let d = parse_date(&c[2]);
         match &c[1] {
             "📅" => due = d,
             "⏳" => scheduled = d,
             "🛫" => start = d,
+            "✅" => done = d,
             _ => {}
         }
     }
@@ -141,6 +148,8 @@ fn build_task(vault: &str, root: &Path, file: &Path, line_no: usize, line: &str)
         priority,
         recurrence,
         in_progress: status == '/',
+        completed,
+        done,
     })
 }
 
@@ -230,6 +239,18 @@ pub fn complete_task(task: &Task) -> Result<(), String> {
     })
 }
 
+static DONE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s*✅\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
+
+/// Reopens a completed task: `[x]` back to `[ ]` and removes the `✅` date.
+pub fn uncomplete_task(task: &Task) -> Result<(), String> {
+    rewrite_line(task, |line| {
+        let caps = TASK_RE.captures(line).ok_or("Line is no longer a task")?;
+        let body = DONE_RE.replace_all(&caps[4], "").trim_end().to_string();
+        Ok(format!("{} {}{}", &caps[1], &caps[3], body))
+    })
+}
+
 static SCHED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*⏳\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
 
@@ -298,7 +319,10 @@ mod tests {
     #[test]
     fn skips_done_and_empty() {
         let p = Path::new("/v/a.md");
-        assert!(build_task("V", Path::new("/v"), p, 0, "- [x] done").is_none());
+        let done = build_task("V", Path::new("/v"), p, 0, "- [x] done ✅ 2026-11-01").unwrap();
+        assert!(done.completed);
+        assert_eq!(done.done, parse_date("2026-11-01"));
+        assert!(build_task("V", Path::new("/v"), p, 0, "- [-] cancelled").is_none());
         assert!(build_task("V", Path::new("/v"), p, 0, "- [ ]").is_none());
         assert!(build_task("V", Path::new("/v"), p, 0, "- [ ] ").is_none());
         assert!(build_task("V", Path::new("/v"), p, 0, "\t- [ ] nested").is_some());
@@ -315,6 +339,11 @@ mod tests {
         let out = fs::read_to_string(&f).unwrap();
         let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
         assert_eq!(out, format!("# H\n- [ ] keep\n\t- [x] Do it 📅 2026-01-01 ✅ {today}\n"));
+        let t = scan_vault(&dir, &[]).into_iter().find(|t| t.description == "Do it").unwrap();
+        assert!(t.completed);
+        uncomplete_task(&t).unwrap();
+        let out = fs::read_to_string(&f).unwrap();
+        assert_eq!(out, "# H\n- [ ] keep\n\t- [ ] Do it 📅 2026-01-01\n");
     }
 
     #[test]

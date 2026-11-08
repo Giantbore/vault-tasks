@@ -26,6 +26,8 @@ const RED: Color32 = Color32::from_rgb(232, 64, 82);
 const STAR: Color32 = Color32::from_rgb(250, 190, 20);
 const SELECTED: Color32 = Color32::from_rgb(222, 222, 227);
 const HOVER: Color32 = Color32::from_rgb(233, 233, 237);
+const GREEN: Color32 = Color32::from_rgb(52, 168, 90);
+const UNDO_FOR: Duration = Duration::from_secs(8);
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
 enum DefaultDue {
@@ -201,14 +203,53 @@ impl Config {
 enum View {
     All,
     Today,
+    Completed,
     Vault(String),
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Range {
+    Today,
+    Week,
+    Month,
+}
+
+impl Range {
+    const ALL: [Range; 3] = [Range::Today, Range::Week, Range::Month];
+
+    fn label(self) -> &'static str {
+        match self {
+            Range::Today => "Today",
+            Range::Week => "Past 7 days",
+            Range::Month => "Past 30 days",
+        }
+    }
+
+    /// Earliest done date included.
+    fn since(self, today: NaiveDate) -> NaiveDate {
+        let days = match self {
+            Range::Today => 0,
+            Range::Week => 6,
+            Range::Month => 29,
+        };
+        today - chrono::Days::new(days)
+    }
+}
+
 enum Action {
     Complete(Task),
+    Reopen(Task),
     Star(Task, bool),
     Open(Task),
+}
+
+/// The last task checked off, for the Undo bar.
+struct LastCompleted {
+    file: PathBuf,
+    line: usize,
+    description: String,
+    at: Instant,
 }
 
 struct NewTask {
@@ -229,6 +270,8 @@ struct App {
     draft: NewTask,
     focus_new: bool,
     menu: menu::MenuBar,
+    range: Range,
+    last_completed: Option<LastCompleted>,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -254,6 +297,8 @@ impl App {
             draft: NewTask { text: String::new(), due: None, vault: 0 },
             focus_new: false,
             menu: menu::MenuBar::install(&cc.egui_ctx),
+            range: Range::Week,
+            last_completed: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -281,6 +326,7 @@ impl App {
                 Cmd::Refresh => self.rescan(),
                 Cmd::ShowAll => self.view = View::All,
                 Cmd::ShowToday => self.view = View::Today,
+                Cmd::ShowCompleted => self.view = View::Completed,
                 Cmd::GroupByFile => {
                     self.cfg.group_by_file = !self.cfg.group_by_file;
                     self.cfg.save();
@@ -319,15 +365,50 @@ impl App {
     }
 
     fn tasks_for(&self, view: &View, today: NaiveDate) -> Vec<&Task> {
+        if *view == View::Completed {
+            return self.completed_in(self.range, today);
+        }
         self.tasks
             .iter()
-            .filter(|t| self.base_filter(t, today))
+            .filter(|t| !t.completed && self.base_filter(t, today))
             .filter(|t| match view {
-                View::All | View::Settings => true,
+                View::All | View::Settings | View::Completed => true,
                 View::Today => t.starred(today),
                 View::Vault(v) => &t.vault == v,
             })
             .collect()
+    }
+
+    /// Completed tasks with a done date in the range, newest first.
+    fn completed_in(&self, range: Range, today: NaiveDate) -> Vec<&Task> {
+        let since = range.since(today);
+        let q = self.search.trim().to_lowercase();
+        let mut v: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.completed && t.done.is_some_and(|d| d >= since))
+            .filter(|t| {
+                q.is_empty()
+                    || t.description.to_lowercase().contains(&q)
+                    || t.rel_path().to_lowercase().contains(&q)
+            })
+            .collect();
+        v.sort_by(|a, b| (b.done, &a.file, a.line).cmp(&(a.done, &b.file, b.line)));
+        v
+    }
+
+    fn undo_last(&mut self) {
+        let Some(last) = self.last_completed.take() else { return };
+        let found = self
+            .tasks
+            .iter()
+            .find(|t| t.completed && t.file == last.file && t.line == last.line && t.description == last.description)
+            .or_else(|| self.tasks.iter().find(|t| t.completed && t.file == last.file && t.description == last.description))
+            .cloned();
+        match found {
+            Some(t) => self.run(Action::Reopen(t)),
+            None => self.error = Some("Couldn't find that task to undo. Reopen it from Completed.".into()),
+        }
     }
 
     fn run(&mut self, action: Action) {
@@ -337,7 +418,14 @@ impl App {
                 if let Some(s) = &self.cfg.chime {
                     play_sound(s);
                 }
+                self.last_completed = Some(LastCompleted {
+                    file: t.file.clone(),
+                    line: t.line,
+                    description: t.description.clone(),
+                    at: Instant::now(),
+                });
             }),
+            Action::Reopen(t) => tasks::uncomplete_task(t),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
             Action::Open(t) => {
                 open_in_obsidian(t);
@@ -400,6 +488,14 @@ impl App {
         if side_item(ui, "★", STAR, "Today", today_count, today_overdue, self.view == View::Today).clicked() {
             self.view = View::Today;
         }
+        ui.add_space(10.0);
+        let done_today = self.completed_in(Range::Today, today).len();
+        if side_item(ui, "✔", GREEN, "Completed", done_today, 0, self.view == View::Completed)
+            .on_hover_text("Completed today")
+            .clicked()
+        {
+            self.view = View::Completed;
+        }
 
         if self.cfg.vaults.len() > 1 {
             ui.add_space(18.0);
@@ -444,6 +540,7 @@ impl App {
         let (icon, color, title, sub) = match &self.view {
             View::All => ("📥", BLUE, "All Tasks".to_string(), None),
             View::Today => ("★", STAR, "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
+            View::Completed => ("✔", GREEN, "Completed".to_string(), None),
             View::Vault(v) => ("◈", SUBTLE, v.clone(), None),
             View::Settings => ("⚙", SUBTLE, "Settings".to_string(), None),
         };
@@ -596,6 +693,47 @@ impl App {
                     if let Some(a) = task_row(ui, t, today, show_file) {
                         action = Some(a);
                     }
+                }
+            }
+            ui.add_space(20.0);
+        });
+        action
+    }
+
+    fn completed_list(&mut self, ui: &mut egui::Ui, today: NaiveDate) -> Option<Action> {
+        let visible = self.completed_in(self.range, today);
+        if visible.is_empty() {
+            ui.add_space(40.0);
+            ui.vertical_centered(|ui| {
+                let msg = match self.range {
+                    Range::Today => "Nothing completed today yet.",
+                    _ => "Nothing completed in this period.",
+                };
+                ui.label(RichText::new(msg).size(14.0).color(SUBTLE));
+            });
+            return None;
+        }
+        let mut action = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let mut current: Option<NaiveDate> = None;
+            for t in visible {
+                if t.done != current {
+                    current = t.done;
+                    let d = t.done.unwrap_or(today);
+                    let days = (today - d).num_days();
+                    let name = match days {
+                        0 => "Today".to_string(),
+                        1 => "Yesterday".to_string(),
+                        _ => d.format("%A, %B %-d").to_string(),
+                    };
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(GREEN));
+                    let r = ui.available_rect_before_wrap();
+                    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, Color32::from_rgb(228, 228, 232)));
+                    ui.add_space(8.0);
+                }
+                if let Some(a) = completed_row(ui, t) {
+                    action = Some(a);
                 }
             }
             ui.add_space(20.0);
@@ -773,7 +911,7 @@ impl App {
             ui.label(RichText::new(format!(
                 "New tasks are added to \"{}\" at the root of the chosen vault.\nStarring a task sets its ⏳ scheduled date to today (Tasks plugin format).\n{} open tasks, last scan took {} ms.",
                 tasks::INBOX_FILE,
-                self.tasks.len(),
+                self.tasks.iter().filter(|t| !t.completed).count(),
                 self.scan_ms
             )).color(SUBTLE));
         });
@@ -895,6 +1033,36 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
     action
 }
 
+fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.set_min_height(36.0);
+        let mut checked = true;
+        let cb = ui.checkbox(&mut checked, "");
+        if t.recurrence.is_some() {
+            if cb.on_hover_text("Recurring task: opens in Obsidian, since the Tasks plugin already created the next one").clicked() {
+                action = Some(Action::Open(t.clone()));
+            }
+        } else if cb.on_hover_text("Uncheck to reopen").clicked() {
+            action = Some(Action::Reopen(t.clone()));
+        }
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let title = RichText::new(&t.description).size(14.5).color(SUBTLE).strikethrough();
+            let resp = ui
+                .add(egui::Label::new(title).sense(Sense::click()).truncate())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!("Open in Obsidian\n{} / {} (line {})", t.vault, t.rel_path(), t.line + 1));
+            if resp.clicked() {
+                action = Some(Action::Open(t.clone()));
+            }
+            let file = t.file.file_stem().unwrap_or_default().to_string_lossy();
+            ui.label(RichText::new(format!("{} · {}", t.vault, file)).size(11.5).color(SUBTLE));
+        });
+    });
+    action
+}
+
 fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) {
     let days = (d - today).num_days();
     let text = match days {
@@ -981,11 +1149,60 @@ impl eframe::App for App {
                 }
                 if self.view == View::Settings {
                     self.settings(ui);
+                } else if self.view == View::Completed {
+                    ui.horizontal(|ui| {
+                        for r in Range::ALL {
+                            if ui.selectable_label(self.range == r, r.label()).clicked() {
+                                self.range = r;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    action = self.completed_list(ui, today);
                 } else {
                     self.new_task_row(ui, today);
                     action = self.task_list(ui, today);
                 }
             });
+
+        // Undo bar for the last completed task.
+        let mut undo = false;
+        if let Some(last) = &self.last_completed {
+            let left = UNDO_FOR.saturating_sub(last.at.elapsed());
+            if left.is_zero() {
+                self.last_completed = None;
+            } else {
+                ui.ctx().request_repaint_after(left);
+                egui::Area::new(egui::Id::unique("undo_bar"))
+                    .anchor(Align2::CENTER_BOTTOM, vec2(115.0, -20.0))
+                    .show(ui.ctx(), |ui| {
+                        Frame::new()
+                            .fill(Color32::from_rgb(40, 40, 46))
+                            .corner_radius(CornerRadius::same(10))
+                            .inner_margin(Margin::symmetric(16, 10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let mut text = last.description.clone();
+                                    if text.chars().count() > 48 {
+                                        text = text.chars().take(47).collect::<String>() + "…";
+                                    }
+                                    ui.label(RichText::new("✔").color(GREEN));
+                                    ui.label(RichText::new(format!("Completed \"{text}\"")).color(Color32::WHITE));
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .add(egui::Button::new(RichText::new("Undo").color(Color32::from_rgb(140, 200, 255))).frame(false))
+                                        .clicked()
+                                    {
+                                        undo = true;
+                                    }
+                                });
+                            });
+                    });
+            }
+        }
+        if undo {
+            self.undo_last();
+        }
         if let Some(a) = action {
             self.run(a);
         }
