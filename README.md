@@ -15,7 +15,8 @@ A small native macOS app that collects every open task from your Obsidian vaults
 - Click a date chip (or the 📅 button on undated tasks) to set, change or remove a due date. Quick picks plus a calendar; the `📅` date is written to the note.
 - Click a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled in a vault, the note opens at the task's line.
 - Create tasks from the app. They are added to `Vault Tasks.md` at the root of the chosen vault.
-- Settings for vault folders, excluded folders, default due date, chime sound, font and text size.
+- Light and dark themes (or match macOS), with a matching logo and Dock icon.
+- Settings for vault folders, excluded folders, default due date, chime sound, appearance, font and text size.
 - Native macOS menu bar with keyboard shortcuts.
 
 ## Download
@@ -82,7 +83,7 @@ cargo test     # run unit tests
 - `src/main.rs` contains the app window, views and settings
 - `src/menu.rs` builds the macOS menu bar
 - `src/fonts.rs` loads the bundled fonts
-- `assets/icon.svg` is the app icon source. After editing it, run `cargo run --example make_icon` to regenerate `assets/AppIcon.icns`
+- `assets/icon.svg` (dark) and `assets/icon-light.svg` (light) are the icon sources. After editing it, run `cargo run --example make_icon` to regenerate `assets/AppIcon.icns`
 
 ## Credits
 Built with [egui](https://github.com/emilk/egui). Bundled fonts are Manrope and Source Serif 4, both under the SIL Open Font License (see `assets/fonts/README.md`).

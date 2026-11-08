@@ -1,6 +1,7 @@
 mod fonts;
 mod menu;
 mod tasks;
+mod theme;
 
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{
@@ -13,20 +14,10 @@ use std::time::{Duration, Instant};
 use fonts::BodyFont;
 use menu::Cmd;
 use tasks::{Priority, Task};
+use theme::*;
 
 const RESCAN_EVERY: Duration = Duration::from_secs(15);
 
-// Palette (light, Things-like)
-const SIDEBAR_BG: Color32 = Color32::from_rgb(244, 244, 246);
-const MAIN_BG: Color32 = Color32::WHITE;
-const TEXT: Color32 = Color32::from_rgb(30, 30, 32);
-const SUBTLE: Color32 = Color32::from_rgb(150, 150, 156);
-const BLUE: Color32 = Color32::from_rgb(28, 110, 220);
-const RED: Color32 = Color32::from_rgb(232, 64, 82);
-const STAR: Color32 = Color32::from_rgb(250, 190, 20);
-const SELECTED: Color32 = Color32::from_rgb(222, 222, 227);
-const HOVER: Color32 = Color32::from_rgb(233, 233, 237);
-const GREEN: Color32 = Color32::from_rgb(52, 168, 90);
 const UNDO_FOR: Duration = Duration::from_secs(8);
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
@@ -136,6 +127,7 @@ struct Config {
     default_due_days: u32,
     /// Sound played when a task is completed; None = off.
     chime: Option<String>,
+    appearance: Appearance,
 }
 
 impl Default for Config {
@@ -150,6 +142,7 @@ impl Default for Config {
             default_due: DefaultDue::None,
             default_due_days: 3,
             chime: Some("Glass".into()),
+            appearance: Appearance::System,
         }
     }
 }
@@ -281,7 +274,9 @@ struct App {
     menu: menu::MenuBar,
     range: Range,
     last_completed: Option<LastCompleted>,
-    _logo: egui::TextureHandle,
+    _logos: [egui::TextureHandle; 2],
+    /// Theme currently applied (None until the first frame).
+    applied_dark: Option<bool>,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -309,7 +304,8 @@ impl App {
             menu: menu::MenuBar::install(&cc.egui_ctx),
             range: Range::Week,
             last_completed: None,
-            _logo: load_logo(&cc.egui_ctx),
+            _logos: load_logos(&cc.egui_ctx),
+            applied_dark: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -497,7 +493,7 @@ impl App {
         if side_item(ui, Glyph::Logo, "All", all_count, overdue, self.view == View::All).clicked() {
             self.view = View::All;
         }
-        if side_item(ui, Glyph::Text("★", STAR), "Today", today_count, today_overdue, self.view == View::Today).clicked() {
+        if side_item(ui, Glyph::Text("★", star()), "Today", today_count, today_overdue, self.view == View::Today).clicked() {
             self.view = View::Today;
         }
         ui.add_space(10.0);
@@ -511,13 +507,13 @@ impl App {
 
         if self.cfg.vaults.len() > 1 {
             ui.add_space(18.0);
-            ui.label(RichText::new("VAULTS").size(11.0).color(SUBTLE).family(fonts::bold()));
+            ui.label(RichText::new("VAULTS").size(11.0).color(subtle()).family(fonts::bold()));
             ui.add_space(4.0);
             for v in self.cfg.vaults.clone() {
                 let name = vault_name(&v);
                 let count = self.tasks_for(&View::Vault(name.clone()), today).len();
                 let sel = self.view == View::Vault(name.clone());
-                if side_item(ui, Glyph::Text("◈", SUBTLE), &name, count, 0, sel).clicked() {
+                if side_item(ui, Glyph::Text("◈", subtle()), &name, count, 0, sel).clicked() {
                     self.view = View::Vault(name);
                 }
             }
@@ -527,14 +523,14 @@ impl App {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add(egui::Button::new(RichText::new("⚙  Settings").color(TEXT)).frame(false))
+                    .add(egui::Button::new(RichText::new("⚙  Settings").color(text())).frame(false))
                     .clicked()
                 {
                     self.view = View::Settings;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
-                        .add(egui::Button::new(RichText::new("⟳").size(16.0).color(SUBTLE)).frame(false))
+                        .add(egui::Button::new(RichText::new("⟳").size(16.0).color(subtle())).frame(false))
                         .on_hover_text("Refresh")
                         .clicked()
                     {
@@ -551,17 +547,19 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
         let (icon, title, sub) = match &self.view {
             View::All => (Glyph::Logo, "All Tasks".to_string(), None),
-            View::Today => (Glyph::Text("★", STAR), "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
+            View::Today => (Glyph::Text("★", star()), "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
             View::Completed => (Glyph::Done, "Completed".to_string(), None),
-            View::Vault(v) => (Glyph::Text("◈", SUBTLE), v.clone(), None),
-            View::Settings => (Glyph::Text("⚙", SUBTLE), "Settings".to_string(), None),
+            View::Vault(v) => (Glyph::Text("◈", subtle()), v.clone(), None),
+            View::Settings => (Glyph::Text("⚙", subtle()), "Settings".to_string(), None),
         };
         ui.horizontal(|ui| {
-            glyph(ui, 24.0, icon);
-            ui.label(RichText::new(title).size(28.0).family(fonts::heading()).color(TEXT));
+            // Nudge the icon down so it centers on the serif title's letters.
+            let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+            paint_glyph(ui.painter(), rect.center() + vec2(0.0, 3.0), 24.0, icon);
+            ui.label(RichText::new(title).size(28.0).family(fonts::heading()).color(text()));
         });
         if let Some(s) = sub {
-            ui.label(RichText::new(s).size(13.0).color(SUBTLE));
+            ui.label(RichText::new(s).size(13.0).color(subtle()));
         }
         ui.add_space(14.0);
     }
@@ -576,8 +574,8 @@ impl App {
             self.draft.vault = 0;
         }
         Frame::new()
-            .fill(Color32::from_rgb(248, 248, 250))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(230, 230, 234)))
+            .fill(field_bg())
+            .stroke(Stroke::new(1.0, field_stroke()))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
@@ -587,7 +585,7 @@ impl App {
                     // Painted plus sign so it centers exactly on the text line.
                     let (r, _) = ui.allocate_exact_size(vec2(14.0, ROW_H), Sense::hover());
                     let c = r.center();
-                    let stroke = Stroke::new(1.6, BLUE);
+                    let stroke = Stroke::new(1.6, blue());
                     ui.painter().line_segment([c - vec2(5.5, 0.0), c + vec2(5.5, 0.0)], stroke);
                     ui.painter().line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 5.5)], stroke);
                     let hint = if self.view == View::Today { "New task for today" } else { "New task" };
@@ -637,7 +635,7 @@ impl App {
                             }
                             None => {
                                 if ui
-                                    .add(egui::Button::new(RichText::new("📅 Due").color(SUBTLE)).frame(false))
+                                    .add(egui::Button::new(RichText::new("📅 Due").color(subtle())).frame(false))
                                     .clicked()
                                 {
                                     self.draft.due = Some(today);
@@ -663,7 +661,7 @@ impl App {
                 } else {
                     "No open tasks 🎉"
                 };
-                ui.label(RichText::new(msg).size(14.0).color(SUBTLE));
+                ui.label(RichText::new(msg).size(14.0).color(subtle()));
             });
             return None;
         }
@@ -676,16 +674,16 @@ impl App {
                 let key = format!("{} / {}", t.vault, t.rel_path().trim_end_matches(".md"));
                 match groups.last_mut() {
                     Some((k, _, v)) if *k == key => v.push(t),
-                    _ => groups.push((key, BLUE, vec![t])),
+                    _ => groups.push((key, blue(), vec![t])),
                 }
             }
         } else if view == View::Today {
-            groups.push((String::new(), BLUE, visible.clone()));
+            groups.push((String::new(), blue(), visible.clone()));
         } else {
             for name in ["Overdue", "Today", "Next 7 Days", "Later", "No Due Date"] {
                 let items: Vec<&Task> = visible.iter().copied().filter(|t| date_bucket(t.due, today) == name).collect();
                 if !items.is_empty() {
-                    let c = if name == "Overdue" { RED } else { BLUE };
+                    let c = if name == "Overdue" { red() } else { blue() };
                     groups.push((name.to_string(), c, items));
                 }
             }
@@ -698,7 +696,7 @@ impl App {
                     ui.add_space(10.0);
                     ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(*color));
                     let r = ui.available_rect_before_wrap();
-                    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, Color32::from_rgb(228, 228, 232)));
+                    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, rule()));
                     ui.add_space(8.0);
                 }
                 for t in items {
@@ -721,7 +719,7 @@ impl App {
                     Range::Today => "Nothing completed today yet.",
                     _ => "Nothing completed in this period.",
                 };
-                ui.label(RichText::new(msg).size(14.0).color(SUBTLE));
+                ui.label(RichText::new(msg).size(14.0).color(subtle()));
             });
             return None;
         }
@@ -739,9 +737,9 @@ impl App {
                         _ => d.format("%A, %B %-d").to_string(),
                     };
                     ui.add_space(10.0);
-                    ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(GREEN));
+                    ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(green()));
                     let r = ui.available_rect_before_wrap();
-                    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, Color32::from_rgb(228, 228, 232)));
+                    ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, rule()));
                     ui.add_space(8.0);
                 }
                 if let Some(a) = completed_row(ui, t) {
@@ -826,7 +824,7 @@ impl App {
                 }
             });
             if let Some(d) = self.cfg.default_due_date(today) {
-                ui.label(RichText::new(format!("New tasks will be due {}.", d.format("%A, %b %-d"))).size(12.0).color(SUBTLE));
+                ui.label(RichText::new(format!("New tasks will be due {}.", d.format("%A, %b %-d"))).size(12.0).color(subtle()));
             }
             if before != (self.cfg.default_due, self.cfg.default_due_days) {
                 if self.draft.text.trim().is_empty() {
@@ -848,12 +846,12 @@ impl App {
                         let (mine, system) = list_sounds();
                         if !mine.is_empty() {
                             ui.separator();
-                            ui.label(RichText::new("Your sounds").size(11.0).color(SUBTLE));
+                            ui.label(RichText::new("Your sounds").size(11.0).color(subtle()));
                             for s in mine {
                                 ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
                             }
                             ui.separator();
-                            ui.label(RichText::new("macOS").size(11.0).color(SUBTLE));
+                            ui.label(RichText::new("macOS").size(11.0).color(subtle()));
                         }
                         for s in system {
                             ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
@@ -875,7 +873,7 @@ impl App {
                 ui.label(
                     RichText::new("Add your own: drop .aiff, .wav, .mp3, .m4a or .caf files into ~/Library/Sounds.")
                         .size(12.0)
-                        .color(SUBTLE),
+                        .color(subtle()),
                 );
                 if ui.small_button("Open folder").clicked() {
                     if let Some(dir) = user_sounds_dir() {
@@ -887,6 +885,15 @@ impl App {
 
             ui.add_space(20.0);
             section(ui, "Display", "");
+            ui.horizontal(|ui| {
+                ui.label("Appearance");
+                for a in Appearance::ALL {
+                    if ui.selectable_label(self.cfg.appearance == a, a.label()).clicked() && self.cfg.appearance != a {
+                        self.cfg.appearance = a;
+                        self.cfg.save();
+                    }
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("Font");
                 let before = self.cfg.font;
@@ -907,13 +914,13 @@ impl App {
                 ui.label("Text size");
                 let mut size = self.cfg.text_size;
                 ui.add(egui::Slider::new(&mut size, 0..=fonts::SIZES.len() - 1).show_value(false));
-                ui.label(RichText::new(fonts::SIZES[size].0).color(SUBTLE));
+                ui.label(RichText::new(fonts::SIZES[size].0).color(subtle()));
                 if size != self.cfg.text_size {
                     let ctx = ui.ctx().clone();
                     self.set_text_size(&ctx, size);
                 }
             });
-            ui.label(RichText::new("Shortcuts: ⌘= bigger, ⌘- smaller, ⌘0 normal.").size(12.0).color(SUBTLE));
+            ui.label(RichText::new("Shortcuts: ⌘= bigger, ⌘- smaller, ⌘0 normal.").size(12.0).color(subtle()));
             ui.add_space(6.0);
             changed |= ui.checkbox(&mut self.cfg.group_by_file, "Group tasks by file instead of due date").changed();
             changed |= ui.checkbox(&mut self.cfg.hide_future_start, "Hide tasks whose start date (🛫) is in the future").changed();
@@ -930,8 +937,8 @@ impl App {
             ];
             for (id, name, why) in plugins {
                 ui.add_space(4.0);
-                ui.label(RichText::new(name).family(fonts::bold()).color(TEXT));
-                ui.label(RichText::new(why).size(12.0).color(SUBTLE));
+                ui.label(RichText::new(name).family(fonts::bold()).color(text()));
+                ui.label(RichText::new(why).size(12.0).color(subtle()));
                 for v in &self.cfg.vaults {
                     let (mark, state) = match plugin_state(v, id) {
                         PluginState::Enabled => (Glyph::Done, "installed and enabled"),
@@ -941,7 +948,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space(6.0);
                         glyph(ui, 13.0, mark);
-                        ui.label(RichText::new(format!("{}: {state}", vault_name(v))).color(TEXT));
+                        ui.label(RichText::new(format!("{}: {state}", vault_name(v))).color(text()));
                     });
                 }
             }
@@ -953,7 +960,7 @@ impl App {
                 tasks::INBOX_FILE,
                 self.tasks.iter().filter(|t| !t.completed).count(),
                 self.scan_ms
-            )).color(SUBTLE));
+            )).color(subtle()));
         });
         if changed {
             self.cfg.save();
@@ -968,9 +975,9 @@ impl App {
 }
 
 fn section(ui: &mut egui::Ui, title: &str, sub: &str) {
-    ui.label(RichText::new(title).size(15.0).family(fonts::bold()).color(BLUE));
+    ui.label(RichText::new(title).size(15.0).family(fonts::bold()).color(blue()));
     if !sub.is_empty() {
-        ui.label(RichText::new(sub).color(SUBTLE));
+        ui.label(RichText::new(sub).color(subtle()));
     }
     ui.add_space(6.0);
 }
@@ -989,18 +996,36 @@ enum Glyph<'a> {
     Partial,
 }
 
-static LOGO: std::sync::OnceLock<egui::TextureId> = std::sync::OnceLock::new();
+static LOGO_DARK: std::sync::OnceLock<egui::TextureId> = std::sync::OnceLock::new();
+static LOGO_LIGHT: std::sync::OnceLock<egui::TextureId> = std::sync::OnceLock::new();
 
-fn load_logo(ctx: &egui::Context) -> egui::TextureHandle {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-small.png")).expect("icon-small.png");
+fn load_texture(ctx: &egui::Context, name: &str, png: &[u8]) -> egui::TextureHandle {
+    let icon = eframe::icon_data::from_png_bytes(png).expect("logo png");
     let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
     let opts = egui::TextureOptions {
         mipmap_mode: Some(egui::TextureFilter::Linear),
         ..egui::TextureOptions::LINEAR
     };
-    let handle = ctx.load_texture("logo", img, opts);
-    let _ = LOGO.set(handle.id());
-    handle
+    ctx.load_texture(name, img, opts)
+}
+
+/// Loads the in-app logos (dark and light versions). Keep the handles alive.
+fn load_logos(ctx: &egui::Context) -> [egui::TextureHandle; 2] {
+    let dark = load_texture(ctx, "logo-dark", include_bytes!("../assets/icon-small.png"));
+    let light = load_texture(ctx, "logo-light", include_bytes!("../assets/icon-small-light.png"));
+    let _ = LOGO_DARK.set(dark.id());
+    let _ = LOGO_LIGHT.set(light.id());
+    [dark, light]
+}
+
+/// Dock icon for the theme.
+fn dock_icon(dark: bool) -> std::sync::Arc<egui::IconData> {
+    let png: &[u8] = if dark {
+        include_bytes!("../assets/icon.png")
+    } else {
+        include_bytes!("../assets/icon-light.png")
+    };
+    std::sync::Arc::new(eframe::icon_data::from_png_bytes(png).expect("icon png"))
 }
 
 /// Paints a glyph centered at `c`, `size` points tall.
@@ -1010,7 +1035,8 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
             p.text(c, Align2::CENTER_CENTER, t, FontId::proportional(size), color);
         }
         Glyph::Logo => {
-            if let Some(id) = LOGO.get() {
+            let logo = if is_dark() { LOGO_DARK.get() } else { LOGO_LIGHT.get() };
+            if let Some(id) = logo {
                 // The logo has a ~10% transparent margin, so draw it a bit larger.
                 let r = egui::Rect::from_center_size(c, vec2(size * 1.25, size * 1.25));
                 p.image(*id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
@@ -1018,13 +1044,13 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
         }
         Glyph::Done => {
             let r = size * 0.5;
-            p.circle_filled(c, r, GREEN);
+            p.circle_filled(c, r, green());
             let pts = vec![c + vec2(-0.45 * r, 0.02 * r), c + vec2(-0.12 * r, 0.34 * r), c + vec2(0.46 * r, -0.30 * r)];
             p.add(egui::Shape::line(pts, Stroke::new((r * 0.24).max(1.5), Color32::WHITE)));
         }
         Glyph::Missing => {
             let r = size * 0.5;
-            p.circle_filled(c, r, RED);
+            p.circle_filled(c, r, red());
             let k = r * 0.38;
             let st = Stroke::new((r * 0.22).max(1.5), Color32::WHITE);
             p.line_segment([c + vec2(-k, -k), c + vec2(k, k)], st);
@@ -1032,7 +1058,7 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
         }
         Glyph::Partial => {
             let r = size * 0.5;
-            p.circle_filled(c, r, Color32::from_rgb(222, 140, 20));
+            p.circle_filled(c, r, amber());
             p.circle_filled(c, r * 0.3, Color32::WHITE);
         }
     }
@@ -1055,23 +1081,23 @@ fn side_item(
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, CornerRadius::same(6), SELECTED);
+        p.rect_filled(rect, CornerRadius::same(6), theme::selected());
     } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(6), HOVER);
+        p.rect_filled(rect, CornerRadius::same(6), hover());
     }
     let y = rect.center().y;
     paint_glyph(p, egui::pos2(rect.left() + 19.0, y), 16.0, icon);
-    p.text(egui::pos2(rect.left() + 36.0, y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), TEXT);
+    p.text(egui::pos2(rect.left() + 36.0, y), Align2::LEFT_CENTER, label, FontId::proportional(14.5), text());
     let mut right = rect.right() - 10.0;
     if count > 0 {
-        let r = p.text(egui::pos2(right, y), Align2::RIGHT_CENTER, count.to_string(), FontId::proportional(13.0), SUBTLE);
+        let r = p.text(egui::pos2(right, y), Align2::RIGHT_CENTER, count.to_string(), FontId::proportional(13.0), subtle());
         right = r.left() - 8.0;
     }
     if badge > 0 {
         let text = badge.to_string();
         let w = (10.0 + 7.0 * text.len() as f32).max(20.0);
         let b = egui::Rect::from_center_size(egui::pos2(right - w / 2.0, y), vec2(w, 18.0));
-        p.rect_filled(b, CornerRadius::same(9), RED);
+        p.rect_filled(b, CornerRadius::same(9), red());
         p.text(b.center(), Align2::CENTER_CENTER, text, FontId::proportional(11.5), Color32::WHITE);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1098,7 +1124,7 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
                 if t.priority != Priority::Normal {
                     ui.label(RichText::new(t.priority.icon()).size(12.0));
                 }
-                let mut title = RichText::new(&t.description).size(14.5).color(TEXT);
+                let mut title = RichText::new(&t.description).size(14.5).color(text());
                 if t.in_progress {
                     title = title.italics();
                 }
@@ -1116,15 +1142,15 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
                 if let Some(r) = &t.recurrence {
                     sub.push_str(&format!("  ·  🔁 {r}"));
                 }
-                ui.label(RichText::new(sub).size(11.5).color(SUBTLE));
+                ui.label(RichText::new(sub).size(11.5).color(subtle()));
             }
         });
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (icon, color, tip) = if starred {
-                ("★", STAR, "Remove from Today")
+                ("★", star(), "Remove from Today")
             } else {
-                ("☆", Color32::from_rgb(195, 195, 200), "Add to Today")
+                ("☆", faint(), "Add to Today")
             };
             if ui
                 .add(egui::Button::new(RichText::new(icon).size(18.0).color(color)).frame(false))
@@ -1136,7 +1162,7 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
             let resp = match t.due {
                 Some(d) => date_chip(ui, d, today),
                 None => ui
-                    .add(egui::Button::new(RichText::new("📅").size(13.0).color(Color32::from_rgb(195, 195, 200))).frame(false))
+                    .add(egui::Button::new(RichText::new("📅").size(13.0).color(faint())).frame(false))
                     .on_hover_text("Add due date"),
             };
             if let Some(a) = due_menu(&resp, t, today) {
@@ -1162,7 +1188,7 @@ fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
         }
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            let title = RichText::new(&t.description).size(14.5).color(SUBTLE).strikethrough();
+            let title = RichText::new(&t.description).size(14.5).color(subtle()).strikethrough();
             let resp = ui
                 .add(egui::Label::new(title).sense(Sense::click()).truncate())
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1171,7 +1197,7 @@ fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
                 action = Some(Action::Open(t.clone()));
             }
             let file = t.file.file_stem().unwrap_or_default().to_string_lossy();
-            ui.label(RichText::new(format!("{} · {}", t.vault, file)).size(11.5).color(SUBTLE));
+            ui.label(RichText::new(format!("{} · {}", t.vault, file)).size(11.5).color(subtle()));
         });
     });
     action
@@ -1188,11 +1214,11 @@ fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) -> egui::Respons
         _ => d.format("%b %-d, %Y").to_string(),
     };
     let (fg, bg) = if days < 0 {
-        (RED, Color32::from_rgb(253, 232, 235))
+        chip_overdue()
     } else if days == 0 {
-        (Color32::from_rgb(200, 120, 0), Color32::from_rgb(255, 242, 220))
+        chip_today()
     } else {
-        (Color32::from_rgb(110, 110, 116), Color32::from_rgb(238, 238, 241))
+        chip_later()
     };
     // Painted manually so the chip keeps its own height inside the row.
     let galley = ui.painter().layout_no_wrap(text, FontId::proportional(11.5), fg);
@@ -1208,19 +1234,18 @@ fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) -> egui::Respons
 const CAL_CELL: f32 = 32.0;
 const CAL_GAP: f32 = 2.0;
 const MENU_W: f32 = CAL_CELL * 7.0 + CAL_GAP * 6.0;
-const DIVIDER: Color32 = Color32::from_rgb(222, 222, 228);
 
 /// Full-width menu row with a label on the left and an optional hint on the right.
 fn menu_row(ui: &mut egui::Ui, label: &str, hint: &str, color: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(MENU_W, 28.0), Sense::click());
     let p = ui.painter();
     if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(6), HOVER);
+        p.rect_filled(rect, CornerRadius::same(6), hover());
     }
     let y = rect.center().y;
     p.text(egui::pos2(rect.left() + 8.0, y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), color);
     if !hint.is_empty() {
-        p.text(egui::pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, hint, FontId::proportional(13.0), SUBTLE);
+        p.text(egui::pos2(rect.right() - 8.0, y), Align2::RIGHT_CENTER, hint, FontId::proportional(13.0), subtle());
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1228,7 +1253,7 @@ fn menu_row(ui: &mut egui::Ui, label: &str, hint: &str, color: Color32) -> egui:
 /// Divider spanning the full menu width.
 fn menu_divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(MENU_W, 11.0), Sense::hover());
-    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, DIVIDER));
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, divider()));
 }
 
 /// Due date menu opened from a task's date chip (or calendar button).
@@ -1240,7 +1265,7 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
             ui.set_width(MENU_W);
             ui.spacing_mut().item_spacing.y = 1.0;
             ui.add_space(2.0);
-            ui.label(RichText::new("  Due date").size(12.0).family(fonts::bold()).color(SUBTLE));
+            ui.label(RichText::new("  Due date").size(12.0).family(fonts::bold()).color(subtle()));
             ui.add_space(2.0);
             let quick = [
                 ("Today", today),
@@ -1250,7 +1275,7 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
                 ("In 1 week", today + chrono::Days::new(7)),
             ];
             for (label, d) in quick {
-                if menu_row(ui, label, &d.format("%a %b %-d").to_string(), TEXT).clicked() {
+                if menu_row(ui, label, &d.format("%a %b %-d").to_string(), text()).clicked() {
                     out = Some(Action::SetDue(t.clone(), Some(d)));
                     ui.close();
                 }
@@ -1262,7 +1287,7 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
             }
             if t.due.is_some() {
                 menu_divider(ui);
-                if menu_row(ui, "Remove due date", "", RED).clicked() {
+                if menu_row(ui, "Remove due date", "", red()).clicked() {
                     out = Some(Action::SetDue(t.clone(), None));
                     ui.close();
                 }
@@ -1284,15 +1309,15 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
         Align2::CENTER_CENTER,
         month.format("%B %Y").to_string(),
         FontId::new(14.0, fonts::bold()),
-        TEXT,
+        text(),
     );
     for (dx, arrow, forward) in [(0.0, "‹", false), (MENU_W - CAL_CELL, "›", true)] {
         let r = egui::Rect::from_min_size(egui::pos2(head.left() + dx, head.top() + 1.0), vec2(CAL_CELL, 28.0));
         let resp = ui.interact(r, id.with(arrow), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.hovered() {
-            ui.painter().rect_filled(r, CornerRadius::same(6), HOVER);
+            ui.painter().rect_filled(r, CornerRadius::same(6), hover());
         }
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, arrow, FontId::proportional(18.0), TEXT);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, arrow, FontId::proportional(18.0), text());
         if resp.clicked() {
             month = if forward {
                 month + chrono::Months::new(1)
@@ -1315,7 +1340,7 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
         )
     };
     for (i, w) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-        ui.painter().text(cell(i, 0.0, 20.0).center(), Align2::CENTER_CENTER, *w, FontId::proportional(11.5), SUBTLE);
+        ui.painter().text(cell(i, 0.0, 20.0).center(), Align2::CENTER_CENTER, *w, FontId::proportional(11.5), subtle());
     }
     for n in 0..days_in_month {
         let day = month + chrono::Days::new(n as u64);
@@ -1325,11 +1350,11 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
         let is_sel = Some(day) == selected;
         let p = ui.painter();
         if is_sel {
-            p.rect_filled(r, CornerRadius::same(6), BLUE);
+            p.rect_filled(r, CornerRadius::same(6), blue());
         } else if resp.hovered() {
-            p.rect_filled(r, CornerRadius::same(6), HOVER);
+            p.rect_filled(r, CornerRadius::same(6), hover());
         }
-        let color = if is_sel { Color32::WHITE } else if day == today { BLUE } else { TEXT };
+        let color = if is_sel { Color32::WHITE } else if day == today { blue() } else { text() };
         p.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(13.0), color);
         if resp.clicked() {
             picked = Some(day);
@@ -1389,16 +1414,10 @@ fn date_bucket(d: Option<NaiveDate>, today: NaiveDate) -> &'static str {
 }
 
 fn setup_style(ctx: &egui::Context) {
-    ctx.set_visuals(egui::Visuals::light());
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 6.0);
         s.spacing.button_padding = vec2(8.0, 4.0);
         s.spacing.interact_size.y = 22.0;
-        s.visuals.panel_fill = MAIN_BG;
-        s.visuals.selection.bg_fill = Color32::from_rgb(200, 222, 255);
-        s.visuals.widgets.inactive.corner_radius = CornerRadius::same(5);
-        s.visuals.widgets.hovered.corner_radius = CornerRadius::same(5);
-        s.visuals.widgets.active.corner_radius = CornerRadius::same(5);
     });
 }
 
@@ -1409,22 +1428,28 @@ impl eframe::App for App {
         }
         ui.ctx().request_repaint_after(RESCAN_EVERY);
         let ctx = ui.ctx().clone();
+        let dark = self.cfg.appearance.is_dark(&ctx);
+        if self.applied_dark != Some(dark) {
+            theme::apply(&ctx, dark);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(dock_icon(dark))));
+            self.applied_dark = Some(dark);
+        }
         self.handle_menu(&ctx);
 
         egui::Panel::left("sidebar")
             .exact_size(230.0)
             .resizable(false)
-            .frame(Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::symmetric(12, 10)))
+            .frame(Frame::new().fill(sidebar_bg()).inner_margin(Margin::symmetric(12, 10)))
             .show(ui, |ui| self.sidebar(ui));
 
         let today = Local::now().date_naive();
         let mut action = None;
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(MAIN_BG).inner_margin(Margin { left: 40, right: 40, top: 28, bottom: 0 }))
+            .frame(Frame::new().fill(main_bg()).inner_margin(Margin { left: 40, right: 40, top: 28, bottom: 0 }))
             .show(ui, |ui| {
                 self.header(ui, today);
                 if let Some(e) = &self.error {
-                    ui.label(RichText::new(format!("⚠ {e}")).color(RED));
+                    ui.label(RichText::new(format!("⚠ {e}")).color(red()));
                     ui.add_space(6.0);
                 }
                 if self.view == View::Settings {
@@ -1457,7 +1482,7 @@ impl eframe::App for App {
                     .anchor(Align2::CENTER_BOTTOM, vec2(115.0, -20.0))
                     .show(ui.ctx(), |ui| {
                         Frame::new()
-                            .fill(Color32::from_rgb(40, 40, 46))
+                            .fill(toast_bg())
                             .corner_radius(CornerRadius::same(10))
                             .inner_margin(Margin::symmetric(16, 10))
                             .show(ui, |ui| {
@@ -1470,7 +1495,7 @@ impl eframe::App for App {
                                     ui.label(RichText::new(format!("Completed \"{text}\"")).color(Color32::WHITE));
                                     ui.add_space(8.0);
                                     if ui
-                                        .add(egui::Button::new(RichText::new("Undo").color(Color32::from_rgb(140, 200, 255))).frame(false))
+                                        .add(egui::Button::new(RichText::new("Undo").color(link())).frame(false))
                                         .clicked()
                                     {
                                         undo = true;

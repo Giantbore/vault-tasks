@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Light-mode variant of icon.svg: pale tile, deeper blues for contrast -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#f6f8fb"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#d5dbe3" stroke-width="8"/>
+  <!-- Checkbox outline -->
+  <rect x="232" y="232" width="560" height="560" rx="110" fill="none" stroke="#4a94dc" stroke-width="40"/>
+  <!-- Faceted crystal check -->
+  <g transform="translate(512,525) scale(0.68) translate(-535,-532)">
+    <polygon points="310,520 350,480 455,585 455,665" fill="#7db7ea"/>
+    <polygon points="270,560 310,520 455,665 455,745" fill="#2f78c4"/>
+    <polygon points="455,585 720,320 760,360 455,665" fill="#9fcbf2"/>
+    <polygon points="455,665 760,360 800,400 455,745" fill="#4a92da"/>
+    <polygon points="455,665 610,510 455,745" fill="#1f5fa8"/>
+  </g>
+</svg>
