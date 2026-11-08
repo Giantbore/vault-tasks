@@ -51,6 +51,19 @@ impl DefaultDue {
     }
 }
 
+/// Upcoming Friday (today if it is Friday; next week's on Sat/Sun).
+fn end_of_week(today: NaiveDate) -> NaiveDate {
+    let wd = today.weekday().num_days_from_monday() as u64;
+    let days = if wd <= 4 { 4 - wd } else { 11 - wd };
+    today + chrono::Days::new(days)
+}
+
+/// Next Monday (a week from today if today is Monday).
+fn next_monday(today: NaiveDate) -> NaiveDate {
+    let wd = today.weekday().num_days_from_monday() as u64;
+    today + chrono::Days::new(7 - wd)
+}
+
 const SOUND_EXTS: [&str; 6] = ["aiff", "aif", "wav", "mp3", "m4a", "caf"];
 const SYSTEM_SOUNDS: &str = "/System/Library/Sounds";
 
@@ -147,12 +160,7 @@ impl Config {
             DefaultDue::None => None,
             DefaultDue::Today => Some(today),
             DefaultDue::DaysOut => Some(today + chrono::Days::new(self.default_due_days as u64)),
-            DefaultDue::EndOfWeek => {
-                // Upcoming Friday (today if it is Friday; next week's on Sat/Sun).
-                let wd = today.weekday().num_days_from_monday() as u64;
-                let days = if wd <= 4 { 4 - wd } else { 11 - wd };
-                Some(today + chrono::Days::new(days))
-            }
+            DefaultDue::EndOfWeek => Some(end_of_week(today)),
         }
     }
 }
@@ -241,6 +249,7 @@ enum Action {
     Complete(Task),
     Reopen(Task),
     Star(Task, bool),
+    SetDue(Task, Option<NaiveDate>),
     Open(Task),
 }
 
@@ -427,6 +436,7 @@ impl App {
             }),
             Action::Reopen(t) => tasks::uncomplete_task(t),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
+            Action::SetDue(t, d) => tasks::set_due(t, *d),
             Action::Open(t) => {
                 open_in_obsidian(t);
                 Ok(())
@@ -907,6 +917,18 @@ impl App {
             changed |= ui.checkbox(&mut self.cfg.hide_future_start, "Hide tasks whose start date (🛫) is in the future").changed();
 
             ui.add_space(20.0);
+            section(ui, "Jump to line", "Clicking a task opens its note at the task's line when the free Advanced URI plugin is installed and enabled in that vault (Obsidian → Settings → Community plugins → Browse → \"Advanced URI\"). Otherwise the note opens at the top.");
+            for v in &self.cfg.vaults {
+                let ok = has_advanced_uri(v);
+                ui.label(RichText::new(format!(
+                    "{}  {}",
+                    if ok { "✔" } else { "✖" },
+                    format!("{}: {}", vault_name(v), if ok { "Advanced URI installed" } else { "Advanced URI not installed" })
+                ))
+                .color(if ok { GREEN } else { SUBTLE }));
+            }
+
+            ui.add_space(20.0);
             section(ui, "About", "");
             ui.label(RichText::new(format!(
                 "New tasks are added to \"{}\" at the root of the chosen vault.\nStarring a task sets its ⏳ scheduled date to today (Tasks plugin format).\n{} open tasks, last scan took {} ms.",
@@ -1025,8 +1047,14 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
             {
                 action = Some(Action::Star(t.clone(), !starred));
             }
-            if let Some(d) = t.due {
-                date_chip(ui, d, today);
+            let resp = match t.due {
+                Some(d) => date_chip(ui, d, today),
+                None => ui
+                    .add(egui::Button::new(RichText::new("📅").size(13.0).color(Color32::from_rgb(195, 195, 200))).frame(false))
+                    .on_hover_text("Add due date"),
+            };
+            if let Some(a) = due_menu(&resp, t, today) {
+                action = Some(a);
             }
         });
     });
@@ -1063,7 +1091,7 @@ fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
     action
 }
 
-fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) {
+fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) -> egui::Response {
     let days = (d - today).num_days();
     let text = match days {
         0 => "Today".to_string(),
@@ -1083,18 +1111,130 @@ fn date_chip(ui: &mut egui::Ui, d: NaiveDate, today: NaiveDate) {
     // Painted manually so the chip keeps its own height inside the row.
     let galley = ui.painter().layout_no_wrap(text, FontId::proportional(11.5), fg);
     let size = galley.size() + vec2(12.0, 4.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let bg = if resp.hovered() { bg.gamma_multiply(0.85) } else { bg };
     ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Change due date")
+}
+
+/// Due date menu opened from a task's date chip (or calendar button).
+fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action> {
+    let mut out = None;
+    egui::Popup::menu(resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(230.0);
+            ui.set_max_width(230.0);
+            ui.label(RichText::new("Due date").size(12.0).family(fonts::bold()).color(SUBTLE));
+            let quick = [
+                ("Today", today),
+                ("Tomorrow", today + chrono::Days::new(1)),
+                ("End of week", end_of_week(today)),
+                ("Next Monday", next_monday(today)),
+                ("In 1 week", today + chrono::Days::new(7)),
+            ];
+            for (label, d) in quick {
+                let b = egui::Button::new(RichText::new(label).color(TEXT))
+                    .right_text(RichText::new(d.format("%a %b %-d").to_string()).color(SUBTLE))
+                    .frame(false);
+                if ui.add(b).clicked() {
+                    out = Some(Action::SetDue(t.clone(), Some(d)));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if let Some(d) = calendar(ui, resp.id.with("cal"), t.due, today) {
+                out = Some(Action::SetDue(t.clone(), Some(d)));
+                ui.close();
+            }
+            if t.due.is_some() {
+                ui.separator();
+                if ui.add(egui::Button::new(RichText::new("Remove due date").color(RED)).frame(false)).clicked() {
+                    out = Some(Action::SetDue(t.clone(), None));
+                    ui.close();
+                }
+            }
+        });
+    out
+}
+
+/// Month calendar. Returns the clicked day.
+fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today: NaiveDate) -> Option<NaiveDate> {
+    let start = selected.unwrap_or(today);
+    let mut month: NaiveDate = ui.data_mut(|d| {
+        *d.get_temp_mut_or_insert_with(id, || start.with_day(1).unwrap())
+    });
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new("‹").frame(false)).clicked() {
+            month = (month - chrono::Days::new(1)).with_day(1).unwrap();
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.add(egui::Button::new("›").frame(false)).clicked() {
+                month = month + chrono::Months::new(1);
+            }
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new(month.format("%B %Y").to_string()).family(fonts::bold()).color(TEXT));
+            });
+        });
+    });
+    egui::Grid::new(id.with("grid")).spacing([2.0, 2.0]).show(ui, |ui| {
+        for w in ["M", "T", "W", "T", "F", "S", "S"] {
+            ui.centered_and_justified(|ui| ui.label(RichText::new(w).size(11.0).color(SUBTLE)));
+        }
+        ui.end_row();
+        let offset = month.weekday().num_days_from_monday();
+        for _ in 0..offset {
+            ui.label("");
+        }
+        let mut col = offset;
+        let mut day = month;
+        while day.month() == month.month() {
+            let is_sel = Some(day) == selected;
+            let color = if is_sel {
+                Color32::WHITE
+            } else if day == today {
+                BLUE
+            } else {
+                TEXT
+            };
+            let mut b = egui::Button::new(RichText::new(day.day().to_string()).size(12.5).color(color))
+                .min_size(vec2(28.0, 24.0))
+                .corner_radius(CornerRadius::same(5));
+            b = if is_sel { b.fill(BLUE) } else { b.frame(false) };
+            if ui.add(b).clicked() {
+                picked = Some(day);
+            }
+            col += 1;
+            if col % 7 == 0 {
+                ui.end_row();
+            }
+            day = day + chrono::Days::new(1);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, month));
+    picked
+}
+
+/// True if the vault has the Advanced URI community plugin installed and enabled,
+/// which lets us open a note at a specific line.
+fn has_advanced_uri(vault_root: &std::path::Path) -> bool {
+    let obs = vault_root.join(".obsidian");
+    obs.join("plugins/obsidian-advanced-uri").is_dir()
+        && std::fs::read_to_string(obs.join("community-plugins.json"))
+            .is_ok_and(|s| s.contains("\"obsidian-advanced-uri\""))
 }
 
 fn open_in_obsidian(t: &Task) {
     use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-    let url = format!(
-        "obsidian://open?vault={}&file={}",
-        utf8_percent_encode(&t.vault, NON_ALPHANUMERIC),
-        utf8_percent_encode(&t.rel_path(), NON_ALPHANUMERIC)
-    );
+    let vault = utf8_percent_encode(&t.vault, NON_ALPHANUMERIC).to_string();
+    let path = utf8_percent_encode(&t.rel_path(), NON_ALPHANUMERIC).to_string();
+    let url = if has_advanced_uri(&t.vault_root) {
+        format!("obsidian://adv-uri?vault={vault}&filepath={path}&line={}", t.line + 1)
+    } else {
+        format!("obsidian://open?vault={vault}&file={path}")
+    };
     let _ = std::process::Command::new("open").arg(url).spawn();
 }
 

@@ -253,16 +253,30 @@ pub fn uncomplete_task(task: &Task) -> Result<(), String> {
 
 static SCHED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*⏳\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
+static DUE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s*📅\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
+static BLOCK_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s\^[A-Za-z0-9-]+\s*$").unwrap());
+
+/// Removes one date field (matched by `re`) and, if `date` is set, re-adds it as
+/// `<emoji> YYYY-MM-DD` at the end of the line (before a trailing `^block-id`).
+fn replace_date_field(line: &str, re: &Regex, emoji: &str, date: Option<NaiveDate>) -> String {
+    let l = re.replace_all(line, "").trim_end().to_string();
+    let Some(d) = date else { return l };
+    let field = format!(" {emoji} {}", ymd(d));
+    match BLOCK_ID_RE.find(&l) {
+        Some(m) => format!("{}{}{}", &l[..m.start()], field, &l[m.start()..]),
+        None => l + &field,
+    }
+}
 
 /// Sets or clears the Tasks plugin scheduled date (`⏳ YYYY-MM-DD`). Used for the Today list.
 pub fn set_scheduled(task: &Task, date: Option<NaiveDate>) -> Result<(), String> {
-    rewrite_line(task, |line| {
-        let mut l = SCHED_RE.replace_all(line, "").trim_end().to_string();
-        if let Some(d) = date {
-            l.push_str(&format!(" ⏳ {}", ymd(d)));
-        }
-        Ok(l)
-    })
+    rewrite_line(task, |line| Ok(replace_date_field(line, &SCHED_RE, "⏳", date)))
+}
+
+/// Sets or clears the due date (`📅 YYYY-MM-DD`).
+pub fn set_due(task: &Task, date: Option<NaiveDate>) -> Result<(), String> {
+    rewrite_line(task, |line| Ok(replace_date_field(line, &DUE_RE, "📅", date)))
 }
 
 pub const INBOX_FILE: &str = "Vault Tasks.md";
@@ -364,6 +378,15 @@ mod tests {
         assert!(!t.starred(today));
         assert_eq!(t.due, parse_date("2026-12-01"));
         assert!(fs::read_to_string(dir.join(INBOX_FILE)).unwrap().starts_with("# Vault Tasks"));
+    }
+
+    #[test]
+    fn due_dates() {
+        let d = parse_date("2026-11-13");
+        assert_eq!(replace_date_field("- [ ] A", &DUE_RE, "📅", d), "- [ ] A 📅 2026-11-13");
+        assert_eq!(replace_date_field("- [ ] A 📅 2026-01-01 #x", &DUE_RE, "📅", d), "- [ ] A #x 📅 2026-11-13");
+        assert_eq!(replace_date_field("- [ ] A 📅 2026-01-01", &DUE_RE, "📅", None), "- [ ] A");
+        assert_eq!(replace_date_field("- [ ] A ^abc-1", &DUE_RE, "📅", d), "- [ ] A 📅 2026-11-13 ^abc-1");
     }
 
     #[test]

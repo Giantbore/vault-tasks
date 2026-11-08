@@ -1,3 +1,8 @@
+---
+title: README
+date created: 2026-11-07T12:57
+date modified: 2026-11-07T20:05
+---
 # Vault Tasks
 A small native macOS app that collects every open task from your Obsidian vaults into one list. It reads and writes the same format as the Obsidian [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) plugin, so everything stays in your notes.
 
@@ -7,7 +12,8 @@ A small native macOS app that collects every open task from your Obsidian vaults
 - Per-vault views in the sidebar, plus Quick Find search.
 - Check a task off to mark it done in its note (`[x]` and `✅ date`), with an optional completion chime and an Undo bar.
 - **Completed** view lists tasks done today, in the past 7 days or past 30 days, grouped by day. Uncheck one to reopen it.
-- Click a task to open its note in Obsidian.
+- Click a date chip (or the 📅 button on undated tasks) to set, change or remove a due date. Quick picks plus a calendar; the `📅` date is written to the note.
+- Click a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled in a vault, the note opens at the task's line.
 - Create tasks from the app. They are added to `Vault Tasks.md` at the root of the chosen vault.
 - Settings for vault folders, excluded folders, default due date, chime sound, font and text size.
 - Native macOS menu bar with keyboard shortcuts.
@@ -20,7 +26,7 @@ A small native macOS app that collects every open task from your Obsidian vaults
 
 Works on Apple Silicon and Intel Macs running macOS 11 or later.
 
-## Build from source
+## Build from Source
 Requirements: macOS 11 or later and the Rust toolchain.
 ```bash
 brew install rustup
@@ -32,15 +38,15 @@ Build and install the app into `~/Applications`:
 ```
 Other options: `--universal` builds one app for Apple Silicon and Intel, and `--zip` writes a shareable zip to `target/`. Builds go to `target/bundle.noindex/` so Spotlight doesn't list them as extra apps.
 
-## Publishing a release
+## Publishing a Release
 1. Bump `version` in `Cargo.toml` and commit.
 2. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
 3. The **Release** GitHub Action runs the tests, builds the universal app and attaches the zip to a new release.
 
-## First run
+## First Run
 The app looks for vaults in Obsidian's iCloud folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents`). Vaults stored anywhere else can be added in **Settings → Vault folders**. Settings are saved to `~/Library/Application Support/vault-tasks/config.json`.
 
-## Task format
+## Task Format
 Tasks are Markdown checkboxes. These Tasks plugin markers are recognized:
 - `📅 2026-11-10` due date
 - `⏳ 2026-11-10` scheduled date (used for the Today list)
@@ -52,14 +58,14 @@ Tasks are Markdown checkboxes. These Tasks plugin markers are recognized:
 
 Recurring tasks open in Obsidian when checked, so the Tasks plugin can create the next occurrence. Tasks inside code blocks and hidden folders such as `.obsidian` are ignored.
 
-## Keyboard shortcuts
+## Keyboard Shortcuts
 - ⌘N new task
 - ⌘R refresh
 - ⌘1 All, ⌘2 Today, ⌘3 Completed
 - ⌘, Settings
 - ⌘= bigger text, ⌘- smaller text, ⌘0 normal text
 
-## Custom chime sounds
+## Custom Chime Sounds
 The chime picker lists the macOS system sounds plus anything in `~/Library/Sounds`. Drop `.aiff`, `.wav`, `.mp3`, `.m4a` or `.caf` files there (Settings has an **Open folder** button). Short clips under one second work best.
 
 To make your own, record in Voice Memos or QuickTime, or download a free clip, then trim it and convert it with the built-in `afconvert`:
