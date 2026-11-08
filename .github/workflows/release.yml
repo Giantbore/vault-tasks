@@ -13,7 +13,7 @@ jobs:
   release:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -43,5 +43,10 @@ jobs:
 
           Works on Apple Silicon and Intel Macs running macOS 11 or later.
           EOF
-          gh release create "$GITHUB_REF_NAME" "target/Vault-Tasks-$VERSION-macOS.zip" \
-            --title "Vault Tasks $VERSION" --notes-file notes.md
+          ZIP="target/Vault-Tasks-$VERSION-macOS.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Tag was re-pushed: replace the zip on the existing release.
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" --title "Vault Tasks $VERSION" --notes-file notes.md
+          fi

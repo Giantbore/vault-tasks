@@ -3,11 +3,12 @@
 //! From assets/icon.svg (dark):
 //! - assets/AppIcon.icns    app bundle icon (Finder, Spotlight)
 //! - assets/icon.png        Dock icon in dark mode
-//! - assets/icon-small.png  in-app logo in dark mode
 //!
 //! From assets/icon-light.svg (light):
-//! - assets/icon-light.png        Dock icon in light mode
-//! - assets/icon-small-light.png  in-app logo in light mode
+//! - assets/icon-light.png  Dock icon in light mode
+//!
+//! From assets/glyph.svg and glyph-light.svg (checkbox only, no tile):
+//! - assets/glyph.png, assets/glyph-light.png  in-app logo for dark / light mode
 use resvg::{tiny_skia, usvg};
 use std::process::Command;
 
@@ -45,9 +46,11 @@ fn main() {
     }
 
     render(&dark, 512).save_png(format!("{root}/assets/icon.png")).unwrap();
-    render(&dark, 128).save_png(format!("{root}/assets/icon-small.png")).unwrap();
     render(&light, 512).save_png(format!("{root}/assets/icon-light.png")).unwrap();
-    render(&light, 128).save_png(format!("{root}/assets/icon-small-light.png")).unwrap();
+    for name in ["glyph", "glyph-light"] {
+        let tree = load(&format!("{root}/assets/{name}.svg"));
+        render(&tree, 128).save_png(format!("{root}/assets/{name}.png")).unwrap();
+    }
 
     let out = format!("{root}/assets/AppIcon.icns");
     let status = Command::new("iconutil")

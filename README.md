@@ -83,7 +83,7 @@ cargo test     # run unit tests
 - `src/main.rs` contains the app window, views and settings
 - `src/menu.rs` builds the macOS menu bar
 - `src/fonts.rs` loads the bundled fonts
-- `assets/icon.svg` (dark) and `assets/icon-light.svg` (light) are the icon sources. After editing it, run `cargo run --example make_icon` to regenerate `assets/AppIcon.icns`
+- `assets/icon.svg` and `assets/icon-light.svg` are the app icon (dark and light); `assets/glyph.svg` and `assets/glyph-light.svg` are the in-app logo without the tile. After editing any of them, run `cargo run --example make_icon` to regenerate the PNGs and `assets/AppIcon.icns`
 
 ## Credits
 Built with [egui](https://github.com/emilk/egui). Bundled fonts are Manrope and Source Serif 4, both under the SIL Open Font License (see `assets/fonts/README.md`).

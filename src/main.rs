@@ -1011,8 +1011,8 @@ fn load_texture(ctx: &egui::Context, name: &str, png: &[u8]) -> egui::TextureHan
 
 /// Loads the in-app logos (dark and light versions). Keep the handles alive.
 fn load_logos(ctx: &egui::Context) -> [egui::TextureHandle; 2] {
-    let dark = load_texture(ctx, "logo-dark", include_bytes!("../assets/icon-small.png"));
-    let light = load_texture(ctx, "logo-light", include_bytes!("../assets/icon-small-light.png"));
+    let dark = load_texture(ctx, "logo-dark", include_bytes!("../assets/glyph.png"));
+    let light = load_texture(ctx, "logo-light", include_bytes!("../assets/glyph-light.png"));
     let _ = LOGO_DARK.set(dark.id());
     let _ = LOGO_LIGHT.set(light.id());
     [dark, light]
@@ -1037,8 +1037,7 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
         Glyph::Logo => {
             let logo = if is_dark() { LOGO_DARK.get() } else { LOGO_LIGHT.get() };
             if let Some(id) = logo {
-                // The logo has a ~10% transparent margin, so draw it a bit larger.
-                let r = egui::Rect::from_center_size(c, vec2(size * 1.25, size * 1.25));
+                let r = egui::Rect::from_center_size(c, vec2(size, size));
                 p.image(*id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
             }
         }
