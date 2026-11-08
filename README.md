@@ -12,7 +12,15 @@ A small native macOS app that collects every open task from your Obsidian vaults
 - Settings for vault folders, excluded folders, default due date, chime sound, font and text size.
 - Native macOS menu bar with keyboard shortcuts.
 
-## Install
+## Download
+1. Download the latest **Vault-Tasks-…-macOS.zip** from [Releases](https://github.com/thomaspeterson2/vault-tasks/releases/latest) and unzip it.
+2. Drag **Vault Tasks.app** into your Applications folder.
+3. Open it. macOS will say it can't verify the developer, because the app isn't signed with an Apple Developer ID.
+4. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to Vault Tasks. You only need to do this once.
+
+Works on Apple Silicon and Intel Macs running macOS 11 or later.
+
+## Build from source
 Requirements: macOS 11 or later and the Rust toolchain.
 ```bash
 brew install rustup
@@ -22,7 +30,12 @@ Build and install the app into `~/Applications`:
 ```bash
 ./bundle.sh --install
 ```
-Run `./bundle.sh` without `--install` to build `target/bundle.noindex/Vault Tasks.app` only (the `.noindex` folder keeps Spotlight from listing build copies). Run the same command again after pulling changes to update the app.
+Other options: `--universal` builds one app for Apple Silicon and Intel, and `--zip` writes a shareable zip to `target/`. Builds go to `target/bundle.noindex/` so Spotlight doesn't list them as extra apps.
+
+## Publishing a release
+1. Bump `version` in `Cargo.toml` and commit.
+2. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`.
+3. The **Release** GitHub Action runs the tests, builds the universal app and attaches the zip to a new release.
 
 ## First run
 The app looks for vaults in Obsidian's iCloud folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents`). Vaults stored anywhere else can be added in **Settings → Vault folders**. Settings are saved to `~/Library/Application Support/vault-tasks/config.json`.
