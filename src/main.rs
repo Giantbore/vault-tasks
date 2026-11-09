@@ -277,6 +277,8 @@ struct App {
     _logos: [egui::TextureHandle; 2],
     /// Theme currently applied (None until the first frame).
     applied_dark: Option<bool>,
+    /// When the user last refreshed by hand (drives the refresh button animation).
+    refreshed_at: Option<Instant>,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -306,6 +308,7 @@ impl App {
             last_completed: None,
             _logos: load_logos(&cc.egui_ctx),
             applied_dark: None,
+            refreshed_at: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -330,7 +333,7 @@ impl App {
                     }
                     self.focus_new = true;
                 }
-                Cmd::Refresh => self.rescan(),
+                Cmd::Refresh => self.manual_refresh(),
                 Cmd::ShowAll => self.view = View::All,
                 Cmd::ShowToday => self.view = View::Today,
                 Cmd::ShowCompleted => self.view = View::Completed,
@@ -359,6 +362,12 @@ impl App {
         self.tasks = all;
         self.last_scan = Instant::now();
         self.scan_ms = start.elapsed().as_millis();
+    }
+
+    /// Rescan because the user asked to, and show feedback on the refresh button.
+    fn manual_refresh(&mut self) {
+        self.rescan();
+        self.refreshed_at = Some(Instant::now());
     }
 
     fn base_filter(&self, t: &Task, today: NaiveDate) -> bool {
@@ -521,7 +530,8 @@ impl App {
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            let row = vec2(ui.available_width(), 28.0);
+            ui.allocate_ui_with_layout(row, Layout::left_to_right(Align::Center), |ui| {
                 if ui
                     .add(egui::Button::new(RichText::new("⚙  Settings").color(text())).frame(false))
                     .clicked()
@@ -529,12 +539,8 @@ impl App {
                     self.view = View::Settings;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::new(RichText::new("⟳").size(16.0).color(subtle())).frame(false))
-                        .on_hover_text("Refresh")
-                        .clicked()
-                    {
-                        self.rescan();
+                    if refresh_button(ui, self.refreshed_at, self.tasks.len()).clicked() {
+                        self.manual_refresh();
                     }
                 });
             });
@@ -780,7 +786,7 @@ impl App {
             }
 
             ui.add_space(20.0);
-            section(ui, "Excluded folders", "Any file whose path contains one of these is skipped (e.g. Recipes or 05 Journal/Recipes).");
+            section(ui, "Excluded folders", "Any file whose path contains one of these is skipped (e.g. Recipes, Grocery lists, etc.).");
             let mut remove_ex = None;
             for (i, e) in self.cfg.excluded.iter().enumerate() {
                 ui.horizontal(|ui| {
@@ -1067,6 +1073,67 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
 fn glyph(ui: &mut egui::Ui, size: f32, g: Glyph) {
     let (rect, _) = ui.allocate_exact_size(vec2(size * 1.25, size * 1.25), Sense::hover());
     paint_glyph(ui.painter(), rect.center(), size, g);
+}
+
+/// How long the refresh icon spins, then how long the "Updated" check stays.
+const REFRESH_SPIN: f32 = 0.6;
+const REFRESH_DONE: f32 = 2.0;
+
+/// Painted refresh icon (a circular arrow), so it centers exactly in the footer row.
+/// After a manual refresh it spins briefly, then shows a green check and "Updated".
+fn refresh_button(ui: &mut egui::Ui, refreshed_at: Option<Instant>, task_count: usize) -> egui::Response {
+    let since = refreshed_at.map(|t| t.elapsed().as_secs_f32());
+    let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, CornerRadius::same(6), hover());
+    }
+    let c = rect.center();
+    match since {
+        Some(s) if s >= REFRESH_SPIN && s < REFRESH_SPIN + REFRESH_DONE => {
+            paint_glyph(p, c, 15.0, Glyph::Done);
+            ui.label(RichText::new("Updated").size(12.5).color(subtle()));
+        }
+        _ => {
+            let spin = since.filter(|s| *s < REFRESH_SPIN).map(|s| {
+                let t = s / REFRESH_SPIN;
+                // Ease out so it slows into place.
+                (1.0 - (1.0 - t).powi(3)) * std::f32::consts::TAU
+            });
+            let color = if resp.hovered() || spin.is_some() { text() } else { subtle() };
+            paint_refresh_icon(p, c, 6.0, spin.unwrap_or(0.0), color);
+        }
+    }
+    if since.is_some_and(|s| s < REFRESH_SPIN + REFRESH_DONE) {
+        ui.ctx().request_repaint();
+    }
+    let tip = format!("Refresh ({task_count} open tasks)");
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_refresh_icon(p: &egui::Painter, c: egui::Pos2, r: f32, rot: f32, color: Color32) {
+    let stroke = Stroke::new(1.6, color);
+    // Arc from 40° to 330°, leaving a gap at the top right for the arrowhead.
+    let (a0, a1) = (40f32.to_radians(), 330f32.to_radians());
+    let n = 24;
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / n as f32 + rot;
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, stroke));
+    // Arrowhead at the end of the arc, pointing along the direction of travel.
+    let a = a1 + rot;
+    let tip = c + vec2(a.cos(), a.sin()) * r;
+    let dir = vec2(-a.sin(), a.cos());
+    let out = vec2(a.cos(), a.sin());
+    let back = tip - dir * 3.6;
+    p.add(egui::Shape::convex_polygon(
+        vec![tip + dir * 1.2, back + out * 2.8, back - out * 2.8],
+        color,
+        Stroke::NONE,
+    ));
 }
 
 fn side_item(
