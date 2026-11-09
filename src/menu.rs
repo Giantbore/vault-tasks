@@ -46,7 +46,7 @@ impl MenuBar {
         let new_task = item("New Task", cmd_key(Code::KeyN), Cmd::NewTask);
         let refresh = item("Refresh", cmd_key(Code::KeyR), Cmd::Refresh);
         let all = item("All Tasks", cmd_key(Code::Digit1), Cmd::ShowAll);
-        let today = item("Today", cmd_key(Code::Digit2), Cmd::ShowToday);
+        let today = item("Starred", cmd_key(Code::Digit2), Cmd::ShowToday);
         let completed = item("Completed", cmd_key(Code::Digit3), Cmd::ShowCompleted);
         let bigger = item("Bigger Text", cmd_key(Code::Equal), Cmd::Bigger);
         let smaller = item("Smaller Text", cmd_key(Code::Minus), Cmd::Smaller);

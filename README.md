@@ -8,7 +8,7 @@ A small native macOS app that collects every open task from your Obsidian vaults
 
 ## Features
 - **All** view groups open tasks by due date: Overdue, Today, Next 7 Days, Later, No Due Date.
-- **Today** view shows tasks you star. Starring sets the task's ⏳ scheduled date to today, so it also shows as scheduled in Obsidian.
+- **Starred** view shows tasks you star. Starring sets the task's ⏳ scheduled date to today, so it also shows as scheduled in Obsidian.
 - Per-vault views in the sidebar, plus Quick Find search.
 - Check a task off to mark it done in its note (`[x]` and `✅ date`), with an optional completion chime and an Undo bar.
 - **Completed** view lists tasks done today, in the past 7 days or past 30 days, grouped by day. Uncheck one to reopen it.

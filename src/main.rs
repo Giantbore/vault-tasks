@@ -493,7 +493,7 @@ impl App {
         if side_item(ui, Glyph::Logo, "All", all_count, overdue, self.view == View::All).clicked() {
             self.view = View::All;
         }
-        if side_item(ui, Glyph::Text("★", star()), "Today", today_count, today_overdue, self.view == View::Today).clicked() {
+        if side_item(ui, Glyph::Text("★", star()), "Starred", today_count, today_overdue, self.view == View::Today).clicked() {
             self.view = View::Today;
         }
         ui.add_space(10.0);
@@ -547,7 +547,7 @@ impl App {
     fn header(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
         let (icon, title, sub) = match &self.view {
             View::All => (Glyph::Logo, "All Tasks".to_string(), None),
-            View::Today => (Glyph::Text("★", star()), "Today".to_string(), Some(today.format("%A, %B %-d").to_string())),
+            View::Today => (Glyph::Text("★", star()), "Starred".to_string(), Some(today.format("%A, %B %-d").to_string())),
             View::Completed => (Glyph::Done, "Completed".to_string(), None),
             View::Vault(v) => (Glyph::Text("◈", subtle()), v.clone(), None),
             View::Settings => (Glyph::Text("⚙", subtle()), "Settings".to_string(), None),
@@ -588,7 +588,7 @@ impl App {
                     let stroke = Stroke::new(1.6, blue());
                     ui.painter().line_segment([c - vec2(5.5, 0.0), c + vec2(5.5, 0.0)], stroke);
                     ui.painter().line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 5.5)], stroke);
-                    let hint = if self.view == View::Today { "New task for today" } else { "New task" };
+                    let hint = if self.view == View::Today { "New starred task" } else { "New task" };
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.draft.text)
                             .hint_text(hint)
@@ -657,7 +657,7 @@ impl App {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 let msg = if view == View::Today {
-                    "Nothing starred for today. Click ☆ on any task to add it here."
+                    "Nothing starred. Click ☆ on any task to add it here."
                 } else {
                     "No open tasks 🎉"
                 };
@@ -1147,9 +1147,9 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (icon, color, tip) = if starred {
-                ("★", star(), "Remove from Today")
+                ("★", star(), "Remove from Starred")
             } else {
-                ("☆", faint(), "Add to Today")
+                ("☆", faint(), "Add to Starred")
             };
             if ui
                 .add(egui::Button::new(RichText::new(icon).size(18.0).color(color)).frame(false))
