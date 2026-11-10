@@ -2,6 +2,8 @@
 name = "vault-tasks"
 version = "0.2.0"
 edition = "2024"
+description = "A native macOS task list for Obsidian vaults that use the Tasks plugin format"
+license = "MIT"
 
 [dependencies]
 chrono = "0.4.45"

@@ -1,3 +1,16 @@
+# Build output
 target/
 dist/
+
+# macOS
 .DS_Store
+
+# Local settings and data that shouldn't be shared
+*.local.json
+*.local.toml
+.env
+.claude/
+.vscode/
+.idea/
+# App data written into a vault (if you test against a vault inside this folder)
+.vault-tasks.json
