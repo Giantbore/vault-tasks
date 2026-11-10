@@ -256,6 +256,8 @@ enum Action {
     ToggleList(Task, String, bool),
     /// The same change applied to several tasks (or one, from the keyboard).
     Bulk(BulkOp, Vec<Task>),
+    /// Ask before deleting these tasks (shows the confirmation dialog).
+    AskDelete(Vec<Task>),
 }
 
 /// A change that can be applied to many tasks at once.
@@ -265,6 +267,8 @@ enum BulkOp {
     Complete,
     /// Add to list `to`; when moving out of a list view, also leave list `from`.
     MoveToList { to: String, from: Option<String> },
+    /// Remove the task's line from its note.
+    Delete,
 }
 
 /// Drag-and-drop payload: the tasks being dragged onto a list in the sidebar.
@@ -384,6 +388,8 @@ struct App {
     capture: Option<CaptureWindow>,
     /// Shortcut being typed in Settings.
     shortcut_buf: String,
+    /// Tasks waiting for the user to confirm deleting them.
+    confirm_delete: Option<Vec<Task>>,
 }
 
 /// State of the floating quick-capture window.
@@ -445,6 +451,7 @@ impl App {
             hotkey: capture::Hotkey::new(&cc.egui_ctx, &cfg_shortcut),
             capture: None,
             shortcut_buf: cfg_shortcut.clone(),
+            confirm_delete: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -594,6 +601,10 @@ impl App {
                 self.run_bulk(op.clone(), items);
                 return;
             }
+            Action::AskDelete(items) => {
+                self.confirm_delete = (!items.is_empty()).then(|| items.clone());
+                return;
+            }
             Action::Reopen(t) => tasks::uncomplete_task(t),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
             Action::SetDue(t, d) => tasks::set_due(t, *d),
@@ -641,7 +652,13 @@ impl App {
     fn run_bulk(&mut self, op: BulkOp, items: &[Task]) {
         let mut failed: Vec<String> = Vec::new();
         let mut completed = Vec::new();
-        for t in items {
+        let mut items: Vec<&Task> = items.iter().collect();
+        if matches!(op, BulkOp::Delete) {
+            // Delete from the bottom of each file up, so removing one line doesn't
+            // shift the line numbers of the others still to go.
+            items.sort_by(|a, b| (&a.file, std::cmp::Reverse(a.line)).cmp(&(&b.file, std::cmp::Reverse(b.line))));
+        }
+        for t in items.iter().copied() {
             let result = match &op {
                 BulkOp::Due(d) => tasks::set_due(t, *d),
                 // Same as checking one off: recurring tasks open in Obsidian so the
@@ -653,6 +670,11 @@ impl App {
                 BulkOp::Complete => {
                     tasks::complete_task(t).map(|()| completed.push((t.file.clone(), t.line, t.description.clone())))
                 }
+                BulkOp::Delete => tasks::delete_task(t).and_then(|()| match &t.block_id {
+                    // Also drop the task's notes and lists, which nothing points to any more.
+                    Some(id) => self.meta.update(&t.vault_root, id, |m| *m = TaskMeta::default()),
+                    None => Ok(()),
+                }),
                 BulkOp::MoveToList { to, from } => self.edit_lists(t, |lists| {
                     if let Some(from) = from {
                         lists.retain(|l| l != from);
@@ -721,7 +743,10 @@ impl App {
 
     /// Keyboard shortcuts for the task list. Ignored while typing in a text field.
     fn list_keys(&mut self, ctx: &egui::Context, today: NaiveDate) -> Option<Action> {
-        if ctx.egui_wants_keyboard_input() || matches!(self.view, View::Settings | View::Completed) {
+        if ctx.egui_wants_keyboard_input()
+            || self.confirm_delete.is_some()
+            || matches!(self.view, View::Settings | View::Completed)
+        {
             return None;
         }
         use egui::{Key, Modifiers};
@@ -758,6 +783,10 @@ impl App {
             self.scroll_to_cursor = true;
             return None;
         }
+        if pressed(Modifiers::NONE, Key::Backspace) || pressed(Modifiers::NONE, Key::Delete) {
+            let items = self.targets();
+            return (!items.is_empty()).then_some(Action::AskDelete(items));
+        }
         let op = if pressed(Modifiers::NONE, Key::Space) {
             BulkOp::Complete
         } else if pressed(Modifiers::NONE, Key::T) {
@@ -772,6 +801,63 @@ impl App {
         let items = self.targets();
         // `then_some` turns a bool into an Option: Some(value) if true, None if false.
         (!items.is_empty()).then_some(Action::Bulk(op, items))
+    }
+
+    /// Asks before deleting tasks, and says exactly what will happen to the Markdown files.
+    fn delete_dialog(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let items = self.confirm_delete.as_ref()?;
+        let mut confirmed = false;
+        let mut cancel = false;
+        let n = items.len();
+        let frame = Frame::popup(&ctx.global_style()).inner_margin(Margin::same(20)).corner_radius(CornerRadius::same(10));
+        let modal = egui::Modal::new(egui::Id::unique("confirm_delete")).frame(frame).show(ctx, |ui| {
+            ui.set_width(420.0);
+            let title = if n == 1 { "Delete this task?".to_string() } else { format!("Delete {n} tasks?") };
+            ui.label(RichText::new(title).size(17.0).family(fonts::bold()).color(text()));
+            ui.add_space(6.0);
+            let what = if n == 1 { "the task's line" } else { "each task's line" };
+            ui.label(
+                RichText::new(format!(
+                    "This deletes {what} from its Markdown file in your vault. Nothing else in the file changes. \
+                     Notes and lists for it in Vault Tasks are removed too. This can't be undone in Vault Tasks."
+                ))
+                .color(text()),
+            );
+            ui.add_space(8.0);
+            for t in items.iter().take(6) {
+                ui.label(RichText::new(format!("• {}", t.description)).color(text()));
+                ui.label(
+                    RichText::new(format!("    {} / {} (line {})", t.vault, t.rel_path(), t.line + 1))
+                        .size(11.5)
+                        .color(subtle()),
+                );
+            }
+            if n > 6 {
+                ui.label(RichText::new(format!("…and {} more", n - 6)).color(subtle()));
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let delete = egui::Button::new(RichText::new(if n == 1 { "Delete" } else { "Delete all" }).color(Color32::WHITE))
+                        .fill(red());
+                    if ui.add(delete).clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+        // Esc or a click outside the dialog cancels.
+        if cancel || modal.should_close() {
+            self.confirm_delete = None;
+        }
+        if confirmed {
+            let items = self.confirm_delete.take()?;
+            return Some(Action::Bulk(BulkOp::Delete, items));
+        }
+        None
     }
 
     /// Shown in place of the new task box while tasks are selected.
@@ -818,6 +904,9 @@ impl App {
                     if ui.button(RichText::new("✔ Complete").color(green())).clicked() {
                         op = Some(BulkOp::Complete);
                     }
+                    if ui.button(RichText::new("Delete…").color(red())).clicked() {
+                        op = Some(BulkOp::Delete);
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .add(egui::Button::new(RichText::new("✖ Clear").color(subtle())).frame(false))
@@ -832,7 +921,11 @@ impl App {
         ui.add_space(10.0);
         // `?` on an Option returns None from this function when nothing was clicked.
         let op = op?;
-        Some(Action::Bulk(op, self.targets()))
+        Some(match op {
+            // Deleting always asks first.
+            BulkOp::Delete => Action::AskDelete(self.targets()),
+            op => Action::Bulk(op, self.targets()),
+        })
     }
 
     /// The vault quick-capture adds to: the one chosen in Settings, else the first vault.
@@ -1995,7 +2088,10 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
         if is_cursor && r.scroll_to_cursor {
             ui.scroll_to_rect(rect, None);
         }
-        if bg.clicked() {
+        if bg.double_clicked() {
+            // Double-clicking the row (anywhere but the name) opens or closes its notes and lists.
+            toggle_expanded(r, &key);
+        } else if bg.clicked() {
             let m = ui.input(|i| i.modifiers);
             *r.click = Some(RowClick { key: key.clone(), toggle: m.command, range: m.shift });
         }
@@ -2246,6 +2342,10 @@ fn task_menu(ui: &mut egui::Ui, t: &Task, task_lists: &[String], r: &mut RowUi) 
     }
     if ui.button("Open in Obsidian").clicked() {
         out = Some(Action::Open(t.clone()));
+    }
+    ui.separator();
+    if ui.button(RichText::new("Delete task…").color(red())).clicked() {
+        out = Some(Action::AskDelete(vec![t.clone()]));
     }
     if !r.lists.is_empty() {
         ui.separator();
@@ -2883,6 +2983,9 @@ impl eframe::App for App {
             }
         }
         drag_label(ui.ctx());
+        if let Some(a) = self.delete_dialog(ui.ctx()) {
+            action = Some(a);
+        }
         if undo {
             self.undo_last();
         }

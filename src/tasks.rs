@@ -207,6 +207,14 @@ pub fn scan_vault(root: &Path, excluded: &[String]) -> Vec<Task> {
 /// Re-reads the task's file, finds its line (verifying it is unchanged since the scan),
 /// applies `edit` to it, and writes the file back.
 fn rewrite_line(task: &Task, edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
+    // `.map(Some)` wraps the edited line: Some(line) keeps a line, None (see delete_task) removes it.
+    edit_line(task, |line| edit(line).map(Some))
+}
+
+/// Shared by rewrite_line and delete_task: re-reads the file, finds the task's line
+/// (checking it's unchanged since the scan), then replaces it with what `edit`
+/// returns, or removes it if `edit` returns None. Every other line is kept as is.
+fn edit_line(task: &Task, edit: impl FnOnce(&str) -> Result<Option<String>, String>) -> Result<(), String> {
     let text = fs::read_to_string(&task.file).map_err(|e| e.to_string())?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing = text.ends_with('\n');
@@ -220,12 +228,22 @@ fn rewrite_line(task: &Task, edit: impl FnOnce(&str) -> Result<String, String>) 
             .position(|l| l == &task.raw_line)
             .ok_or("Task changed since last scan. Refresh and try again.")?
     };
-    lines[idx] = edit(&lines[idx])?;
+    match edit(&lines[idx])? {
+        Some(new) => lines[idx] = new,
+        None => {
+            lines.remove(idx);
+        }
+    }
     let mut out = lines.join(newline);
-    if trailing {
+    if trailing && !lines.is_empty() {
         out.push_str(newline);
     }
     fs::write(&task.file, out).map_err(|e| e.to_string())
+}
+
+/// Deletes the task's line from its note. Nothing else in the file changes.
+pub fn delete_task(task: &Task) -> Result<(), String> {
+    edit_line(task, |_| Ok(None))
 }
 
 fn ymd(d: NaiveDate) -> String {
@@ -538,5 +556,26 @@ mod tests {
         assert!(out.starts_with("# Capture\n\n- [ ] Buy milk ➕ "));
         assert!(out.ends_with(" 📅 2026-12-01\n"));
         assert!(add_task_in(&dir, "../outside", "x", None, None, None).is_err());
+    }
+
+    #[test]
+    fn deletes_only_the_line() {
+        let dir = std::env::temp_dir().join("vt-test5");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("n.md");
+        fs::write(&f, "# H\n- [ ] A\n- [ ] B 📅 2026-01-01\n- [ ] C\n").unwrap();
+        let mut all = scan_vault(&dir, &[]);
+        // Delete from the bottom up, as the app does, so line numbers stay valid.
+        all.sort_by_key(|t| std::cmp::Reverse(t.line));
+        for t in all.iter().filter(|t| t.description != "B") {
+            delete_task(t).unwrap();
+        }
+        assert_eq!(fs::read_to_string(&f).unwrap(), "# H\n- [ ] B 📅 2026-01-01\n");
+        // A task edited in Obsidian since the scan isn't deleted.
+        let t = scan_vault(&dir, &[]).pop().unwrap();
+        fs::write(&f, "# H\n- [ ] B changed\n").unwrap();
+        assert!(delete_task(&t).is_err());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "# H\n- [ ] B changed\n");
     }
 }

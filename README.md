@@ -19,6 +19,8 @@ A small native macOS app that gathers every open task from your Obsidian vaults 
 - Check a task off to mark it done in its note (`[x]` and `✅ date`), with an optional chime and an Undo bar.
 - Click a task's name to rename it. Dates, priority, recurrence and tags stay on the line. Long names wrap.
 - Click the grey vault and file line under a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled, the note opens at the task's line.
+- Delete a task from its right-click menu, with Delete… in the action bar, or with Backspace. The app always asks first and shows which file and line will be removed; only that line is deleted.
+- Double-click a task's row (anywhere but its name) to open its notes and lists.
 - Click a date chip to set, change or remove a due date, with quick picks and a calendar (weeks start on Sunday).
 - Recurring tasks (`🔁 every week`) open in Obsidian when checked, so the Tasks plugin can create the next one.
 
@@ -116,6 +118,7 @@ When the app changes a task it only edits that task's line and keeps everything 
 - ⌘= bigger text, ⌘- smaller text, ⌘0 normal text
 - Up and Down move between tasks
 - Space completes, and T, M and W set today, tomorrow and next week, for the highlighted task or all selected tasks
+- Backspace or Delete asks to delete the highlighted or selected tasks
 - Cmd-A selects all tasks shown, Esc clears the selection
 - Ctrl+Option+Space quick capture, from any app
 
