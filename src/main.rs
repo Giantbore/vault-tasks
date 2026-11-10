@@ -2100,7 +2100,8 @@ fn date_bucket(d: Option<NaiveDate>, today: NaiveDate) -> &'static str {
 }
 
 fn setup_style(ctx: &egui::Context) {
-    ctx.global_style_mut(|s| {
+    // Both egui themes (light and dark) get the same spacing; see theme::apply.
+    ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 6.0);
         s.spacing.button_padding = vec2(8.0, 4.0);
         s.spacing.interact_size.y = 22.0;

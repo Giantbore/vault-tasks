@@ -89,5 +89,18 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
         w.corner_radius = CornerRadius::same(5);
     }
-    ctx.set_visuals(v);
+    // The text cursor (caret): our accent blue, 2pt wide, blinking.
+    v.text_cursor = egui::style::TextCursorStyle {
+        stroke: egui::Stroke::new(2.0, blue()),
+        blink: true,
+        ..Default::default()
+    };
+    // egui keeps a separate style for its light and dark themes and picks one from the
+    // macOS setting, which can differ from the Appearance chosen in Settings.
+    // `ctx.set_visuals` only updates the style egui thinks is active, so text fields
+    // could end up drawn with egui's default cursor color (e.g. light blue on white).
+    // Setting both makes every widget use our palette whichever one egui picks.
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        ctx.set_visuals_of(theme, v.clone());
+    }
 }
