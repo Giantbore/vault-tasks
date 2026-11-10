@@ -9,9 +9,7 @@ license = "MIT"
 chrono = "0.4.45"
 dirs = "7.0.0"
 eframe = "0.37.0"
-egui_extras = { version = "0.37.0", features = ["datepicker"] }
 global-hotkey = "0.10.0"
-jiff = "0.2.39"
 muda = "0.21.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }

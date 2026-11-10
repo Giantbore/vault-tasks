@@ -379,8 +379,6 @@ struct App {
     row_rects: HashMap<TaskKey, egui::Rect>,
     /// Scroll the cursor row into view on the next frame (after an arrow key).
     scroll_to_cursor: bool,
-    /// Date shown in the action bar's date picker.
-    bulk_date: NaiveDate,
     hotkey: capture::Hotkey,
     /// The quick-capture window, while it's open.
     capture: Option<CaptureWindow>,
@@ -444,7 +442,6 @@ impl App {
             order: Vec::new(),
             row_rects: HashMap::new(),
             scroll_to_cursor: false,
-            bulk_date: Local::now().date_naive(),
             hotkey: capture::Hotkey::new(&cc.egui_ctx, &cfg_shortcut),
             capture: None,
             shortcut_buf: cfg_shortcut.clone(),
@@ -800,15 +797,9 @@ impl App {
                             op = Some(BulkOp::Due(Some(d)));
                         }
                     }
-                    let d = self.bulk_date;
-                    let mut jd = jiff::civil::date(d.year() as i16, d.month() as i8, d.day() as i8);
-                    ui.add(egui_extras::DatePickerButton::new(&mut jd).id_salt("bulk_due").calendar_week(false))
-                        .on_hover_text("Pick a due date");
-                    if let Some(nd) = NaiveDate::from_ymd_opt(jd.year() as i32, jd.month() as u32, jd.day() as u32)
-                        && nd != d
-                    {
-                        self.bulk_date = nd;
-                        op = Some(BulkOp::Due(Some(nd)));
+                    let pick = ui.button("📅 Pick date…");
+                    if let Some(picked) = date_menu(&pick, None, true, today) {
+                        op = Some(BulkOp::Due(picked));
                     }
                     ui.menu_button("Move to list", |ui| {
                         if self.cfg.lists.is_empty() {
@@ -1309,47 +1300,33 @@ impl App {
                                     }
                                 });
                         }
-                        match &mut self.draft.due {
-                            Some(d) => {
-                                if ui.add(egui::Button::new("✖").frame(false)).on_hover_text("Clear due date").clicked() {
-                                    self.draft.due = None;
-                                    self.draft.due_manual = true;
-                                } else {
-                                    let mut jd = jiff::civil::date(d.year() as i16, d.month() as i8, d.day() as i8);
-                                    let chip = ui.add(egui_extras::DatePickerButton::new(&mut jd).id_salt("due").calendar_week(false));
-                                    if let Some(nd) = NaiveDate::from_ymd_opt(jd.year() as i32, jd.month() as u32, jd.day() as u32)
-                                        && nd != *d
-                                    {
-                                        // Picked in the calendar: this date wins over typed phrases.
-                                        *d = nd;
-                                        self.draft.due_manual = true;
-                                        self.draft.flash_at = None;
-                                    }
-                                    // Short blue glow around the chip after a typed phrase changed it.
-                                    if let Some(t) = self.draft.flash_at {
-                                        let age = t.elapsed().as_secs_f32();
-                                        if age < DATE_FLASH {
-                                            let alpha = 1.0 - age / DATE_FLASH;
-                                            ui.painter().rect(
-                                                chip.rect.expand(2.0),
-                                                CornerRadius::same(6),
-                                                blue().gamma_multiply(0.18 * alpha),
-                                                Stroke::new(1.5, blue().gamma_multiply(alpha)),
-                                                egui::StrokeKind::Outside,
-                                            );
-                                            ui.ctx().request_repaint();
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                if ui
-                                    .add(egui::Button::new(RichText::new("📅 Due").color(subtle())).frame(false))
-                                    .clicked()
-                                {
-                                    self.draft.due = Some(today);
-                                    self.draft.due_manual = true;
-                                }
+                        // The due date chip opens the same date menu as a task's chip:
+                        // quick picks, a calendar and "Remove due date".
+                        let chip = match self.draft.due {
+                            Some(d) => date_chip(ui, d, today),
+                            None => ui
+                                .add(egui::Button::new(RichText::new("📅 Due").color(subtle())).frame(false))
+                                .on_hover_text("Set a due date"),
+                        };
+                        if let Some(picked) = date_menu(&chip, self.draft.due, self.draft.due.is_some(), today) {
+                            // Picked by hand: this wins over date phrases typed in the text.
+                            self.draft.due = picked;
+                            self.draft.due_manual = true;
+                            self.draft.flash_at = None;
+                        }
+                        // Short blue glow around the chip after a typed phrase changed it.
+                        if let Some(t) = self.draft.flash_at {
+                            let age = t.elapsed().as_secs_f32();
+                            if age < DATE_FLASH {
+                                let alpha = 1.0 - age / DATE_FLASH;
+                                ui.painter().rect(
+                                    chip.rect.expand(2.0),
+                                    CornerRadius::same(6),
+                                    blue().gamma_multiply(0.18 * alpha),
+                                    Stroke::new(1.5, blue().gamma_multiply(alpha)),
+                                    egui::StrokeKind::Outside,
+                                );
+                                ui.ctx().request_repaint();
                             }
                         }
                     });
@@ -2613,6 +2590,13 @@ fn menu_divider(ui: &mut egui::Ui) {
 
 /// Due date menu opened from a task's date chip (or calendar button).
 fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action> {
+    date_menu(resp, t.due, t.due.is_some(), today).map(|d| Action::SetDue(t.clone(), d))
+}
+
+/// Date menu shown under `resp` when it's clicked: quick picks, a calendar and,
+/// with `allow_remove`, "Remove due date". Returns `Some(Some(date))` for a picked date,
+/// `Some(None)` for remove, and `None` if nothing was chosen this frame.
+fn date_menu(resp: &egui::Response, current: Option<NaiveDate>, allow_remove: bool, today: NaiveDate) -> Option<Option<NaiveDate>> {
     let mut out = None;
     egui::Popup::menu(resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -2631,19 +2615,19 @@ fn due_menu(resp: &egui::Response, t: &Task, today: NaiveDate) -> Option<Action>
             ];
             for (label, d) in quick {
                 if menu_row(ui, label, &d.format("%a %b %-d").to_string(), text()).clicked() {
-                    out = Some(Action::SetDue(t.clone(), Some(d)));
+                    out = Some(Some(d));
                     ui.close();
                 }
             }
             menu_divider(ui);
-            if let Some(d) = calendar(ui, resp.id.with("cal"), t.due, today) {
-                out = Some(Action::SetDue(t.clone(), Some(d)));
+            if let Some(d) = calendar(ui, resp.id.with("cal"), current, today) {
+                out = Some(Some(d));
                 ui.close();
             }
-            if t.due.is_some() {
+            if allow_remove {
                 menu_divider(ui);
                 if menu_row(ui, "Remove due date", "", red()).clicked() {
-                    out = Some(Action::SetDue(t.clone(), None));
+                    out = Some(None);
                     ui.close();
                 }
             }
@@ -2683,7 +2667,8 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
     }
 
     // Weekday letters + day cells.
-    let offset = month.weekday().num_days_from_monday() as usize;
+    // Weeks start on Sunday.
+    let offset = month.weekday().num_days_from_sunday() as usize;
     let days_in_month = (month + chrono::Months::new(1) - month).num_days() as usize;
     let weeks = (offset + days_in_month).div_ceil(7);
     let row_h = 28.0;
@@ -2694,7 +2679,7 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
             vec2(CAL_CELL, h),
         )
     };
-    for (i, w) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
+    for (i, w) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
         ui.painter().text(cell(i, 0.0, 20.0).center(), Align2::CENTER_CENTER, *w, FontId::proportional(11.5), subtle());
     }
     for n in 0..days_in_month {
@@ -2703,13 +2688,25 @@ fn calendar(ui: &mut egui::Ui, id: egui::Id, selected: Option<NaiveDate>, today:
         let r = cell(slot % 7, 22.0 + (slot / 7) as f32 * (row_h + CAL_GAP), row_h);
         let resp = ui.interact(r, id.with(n), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
         let is_sel = Some(day) == selected;
+        let weekend = matches!(day.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun);
         let p = ui.painter();
         if is_sel {
             p.rect_filled(r, CornerRadius::same(6), blue());
         } else if resp.hovered() {
             p.rect_filled(r, CornerRadius::same(6), hover());
+        } else if weekend {
+            // Weekends get a soft grey cell instead of a strong color.
+            p.rect_filled(r, CornerRadius::same(6), hover().gamma_multiply(0.6));
         }
-        let color = if is_sel { Color32::WHITE } else if day == today { blue() } else { text() };
+        let color = if is_sel {
+            Color32::WHITE
+        } else if day == today {
+            blue()
+        } else if weekend {
+            subtle()
+        } else {
+            text()
+        };
         p.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(13.0), color);
         if resp.clicked() {
             picked = Some(day);
