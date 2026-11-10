@@ -11,6 +11,7 @@ use eframe::egui::{
     Stroke, vec2,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use fonts::BodyFont;
@@ -241,6 +242,26 @@ enum Action {
     Rename(Task, String),
     SaveNotes(Task, String),
     ToggleList(Task, String, bool),
+    /// The same change applied to several tasks (or one, from the keyboard).
+    Bulk(BulkOp, Vec<Task>),
+}
+
+/// A change that can be applied to many tasks at once.
+#[derive(Clone)]
+enum BulkOp {
+    Due(Option<NaiveDate>),
+    Complete,
+    /// Add to list `to`; when moving out of a list view, also leave list `from`.
+    MoveToList { to: String, from: Option<String> },
+}
+
+/// A click on a task row that changes the selection.
+struct RowClick {
+    key: TaskKey,
+    /// Cmd held: add or remove this one task.
+    toggle: bool,
+    /// Shift held: select everything between the last clicked task and this one.
+    range: bool,
 }
 
 /// Identifies a task row across frames: (file, line).
@@ -273,9 +294,8 @@ struct ListEdit {
 
 /// The last task checked off, for the Undo bar.
 struct LastCompleted {
-    file: PathBuf,
-    line: usize,
-    description: String,
+    /// (file, line, description) of each task checked off together.
+    items: Vec<(PathBuf, usize, String)>,
     at: Instant,
 }
 
@@ -332,6 +352,20 @@ struct App {
     list_edit: Option<ListEdit>,
     /// The view shown last frame, to notice when the user switches views.
     shown_view: View,
+    /// Selected tasks (Cmd-click, Shift-click, Cmd-A).
+    selection: HashSet<TaskKey>,
+    /// Where a Shift-click range starts: the last task clicked.
+    anchor: Option<TaskKey>,
+    /// The highlighted task that arrow keys move and T/M/W/Space act on when nothing is selected.
+    cursor: Option<TaskKey>,
+    /// Visible tasks in the order shown, from the last frame (for ranges and arrow keys).
+    order: Vec<TaskKey>,
+    /// Where each task row was drawn last frame, so a click on the row's empty space can be caught.
+    row_rects: HashMap<TaskKey, egui::Rect>,
+    /// Scroll the cursor row into view on the next frame (after an arrow key).
+    scroll_to_cursor: bool,
+    /// Date shown in the action bar's date picker.
+    bulk_date: NaiveDate,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -368,6 +402,13 @@ impl App {
             expanded: None,
             list_edit: None,
             shown_view: View::All,
+            selection: HashSet::new(),
+            anchor: None,
+            cursor: None,
+            order: Vec::new(),
+            row_rects: HashMap::new(),
+            scroll_to_cursor: false,
+            bulk_date: Local::now().date_naive(),
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -488,32 +529,35 @@ impl App {
 
     fn undo_last(&mut self) {
         let Some(last) = self.last_completed.take() else { return };
-        let found = self
-            .tasks
-            .iter()
-            .find(|t| t.completed && t.file == last.file && t.line == last.line && t.description == last.description)
-            .or_else(|| self.tasks.iter().find(|t| t.completed && t.file == last.file && t.description == last.description))
-            .cloned();
-        match found {
-            Some(t) => self.run(Action::Reopen(t)),
-            None => self.error = Some("Couldn't find that task to undo. Reopen it from Completed.".into()),
+        let mut missing = 0;
+        for (file, line, description) in &last.items {
+            let found = self
+                .tasks
+                .iter()
+                .find(|t| t.completed && &t.file == file && t.line == *line && &t.description == description)
+                .or_else(|| self.tasks.iter().find(|t| t.completed && &t.file == file && &t.description == description))
+                .cloned();
+            match found.map(|t| tasks::uncomplete_task(&t)) {
+                Some(Ok(())) => {}
+                _ => missing += 1,
+            }
         }
+        self.error = (missing > 0).then(|| format!("Couldn't undo {missing} task(s). Reopen them from Completed."));
+        self.rescan();
     }
 
     fn run(&mut self, action: Action) {
         let today = Local::now().date_naive();
         let result = match &action {
-            Action::Complete(t) => tasks::complete_task(t).inspect(|_| {
-                if let Some(s) = &self.cfg.chime {
-                    play_sound(s);
-                }
-                self.last_completed = Some(LastCompleted {
-                    file: t.file.clone(),
-                    line: t.line,
-                    description: t.description.clone(),
-                    at: Instant::now(),
-                });
-            }),
+            Action::Complete(t) => {
+                // One task is a bulk edit of one: same chime, undo and error handling.
+                self.run_bulk(BulkOp::Complete, std::slice::from_ref(t));
+                return;
+            }
+            Action::Bulk(op, items) => {
+                self.run_bulk(op.clone(), items);
+                return;
+            }
             Action::Reopen(t) => tasks::uncomplete_task(t),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
             Action::SetDue(t, d) => tasks::set_due(t, *d),
@@ -531,13 +575,11 @@ impl App {
                     })
                 }
             }
-            Action::ToggleList(t, list, on) => tasks::ensure_block_id(t).and_then(|id| {
-                self.meta.update(&t.vault_root, &id, |m| {
-                    m.lists.retain(|l| l != list);
-                    if *on {
-                        m.lists.push(list.clone());
-                    }
-                })
+            Action::ToggleList(t, list, on) => self.edit_lists(t, |lists| {
+                lists.retain(|l| l != list);
+                if *on {
+                    lists.push(list.clone());
+                }
             }),
         };
         match result {
@@ -549,6 +591,218 @@ impl App {
             }
             Err(e) => self.error = Some(e),
         }
+    }
+
+    /// Changes which lists a task is in. Gives the task a block ID first if it has none.
+    /// `impl FnOnce(...)` means "any function or closure that takes the list and is called once".
+    fn edit_lists(&mut self, t: &Task, f: impl FnOnce(&mut Vec<String>)) -> Result<(), String> {
+        let id = tasks::ensure_block_id(t)?;
+        self.meta.update(&t.vault_root, &id, |m| f(&mut m.lists))
+    }
+
+    /// Applies one change to each task. A task that fails doesn't stop the others;
+    /// the ones that failed are listed in the error message afterwards.
+    fn run_bulk(&mut self, op: BulkOp, items: &[Task]) {
+        let mut failed: Vec<String> = Vec::new();
+        let mut completed = Vec::new();
+        for t in items {
+            let result = match &op {
+                BulkOp::Due(d) => tasks::set_due(t, *d),
+                // Same as checking one off: recurring tasks open in Obsidian so the
+                // Tasks plugin can create the next occurrence.
+                BulkOp::Complete if t.recurrence.is_some() => {
+                    open_in_obsidian(t);
+                    Ok(())
+                }
+                BulkOp::Complete => {
+                    tasks::complete_task(t).map(|()| completed.push((t.file.clone(), t.line, t.description.clone())))
+                }
+                BulkOp::MoveToList { to, from } => self.edit_lists(t, |lists| {
+                    if let Some(from) = from {
+                        lists.retain(|l| l != from);
+                    }
+                    if !lists.contains(to) {
+                        lists.push(to.clone());
+                    }
+                }),
+            };
+            if let Err(e) = result {
+                failed.push(format!("\"{}\" ({e})", t.description));
+            }
+        }
+        if !completed.is_empty() {
+            if let Some(s) = &self.cfg.chime {
+                play_sound(s);
+            }
+            self.last_completed = Some(LastCompleted { items: completed, at: Instant::now() });
+        }
+        self.error = match failed.len() {
+            0 => None,
+            1 if items.len() == 1 => Some(failed.remove(0)),
+            n => Some(format!("Couldn't update {n} of {} tasks: {}", items.len(), failed.join(", "))),
+        };
+        self.rescan();
+    }
+
+    /// The tasks keyboard shortcuts and the action bar act on: the selection, or else the
+    /// highlighted task, in the order they're shown.
+    fn targets(&self) -> Vec<Task> {
+        let keys: Vec<&TaskKey> = if self.selection.is_empty() {
+            self.cursor.iter().collect()
+        } else {
+            self.order.iter().filter(|k| self.selection.contains(*k)).collect()
+        };
+        keys.into_iter()
+            .filter_map(|k| self.tasks.iter().find(|t| !t.completed && &task_key(t) == k).cloned())
+            .collect()
+    }
+
+    /// Updates the selection after a click on a task row.
+    fn apply_click(&mut self, c: RowClick) {
+        if c.range {
+            let start = self.anchor.clone().or(self.cursor.clone()).unwrap_or(c.key.clone());
+            let a = self.order.iter().position(|k| *k == start);
+            let b = self.order.iter().position(|k| *k == c.key);
+            if !c.toggle {
+                self.selection.clear();
+            }
+            if let (Some(a), Some(b)) = (a, b) {
+                // `a.min(b)..=a.max(b)` is an inclusive range, whichever direction the user went.
+                self.selection.extend(self.order[a.min(b)..=a.max(b)].iter().cloned());
+            }
+        } else if c.toggle {
+            // `insert` returns false if the key was already there: then remove it instead.
+            if !self.selection.insert(c.key.clone()) {
+                self.selection.remove(&c.key);
+            }
+            self.anchor = Some(c.key.clone());
+        } else {
+            self.selection.clear();
+            self.anchor = Some(c.key.clone());
+        }
+        self.cursor = Some(c.key);
+    }
+
+    /// Keyboard shortcuts for the task list. Ignored while typing in a text field.
+    fn list_keys(&mut self, ctx: &egui::Context, today: NaiveDate) -> Option<Action> {
+        if ctx.egui_wants_keyboard_input() || matches!(self.view, View::Settings | View::Completed) {
+            return None;
+        }
+        use egui::{Key, Modifiers};
+        // `consume_key` returns true and removes the key press, so nothing else reacts to it.
+        let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
+        if pressed(Modifiers::NONE, Key::Escape) {
+            self.selection.clear();
+            self.cursor = None;
+            return None;
+        }
+        if pressed(Modifiers::COMMAND, Key::A) {
+            self.selection = self.order.iter().cloned().collect();
+            return None;
+        }
+        let step: isize = if pressed(Modifiers::NONE, Key::ArrowDown) {
+            1
+        } else if pressed(Modifiers::NONE, Key::ArrowUp) {
+            -1
+        } else {
+            0
+        };
+        if step != 0 {
+            if self.order.is_empty() {
+                return None;
+            }
+            let i = self.cursor.as_ref().and_then(|c| self.order.iter().position(|k| k == c));
+            let last = self.order.len() as isize - 1;
+            let next = match i {
+                Some(i) => (i as isize + step).clamp(0, last) as usize,
+                None if step > 0 => 0,
+                None => last as usize,
+            };
+            self.cursor = Some(self.order[next].clone());
+            self.scroll_to_cursor = true;
+            return None;
+        }
+        let op = if pressed(Modifiers::NONE, Key::Space) {
+            BulkOp::Complete
+        } else if pressed(Modifiers::NONE, Key::T) {
+            BulkOp::Due(Some(today))
+        } else if pressed(Modifiers::NONE, Key::M) {
+            BulkOp::Due(Some(today + chrono::Days::new(1)))
+        } else if pressed(Modifiers::NONE, Key::W) {
+            BulkOp::Due(Some(next_monday(today)))
+        } else {
+            return None;
+        };
+        let items = self.targets();
+        // `then_some` turns a bool into an Option: Some(value) if true, None if false.
+        (!items.is_empty()).then_some(Action::Bulk(op, items))
+    }
+
+    /// Shown in place of the new task box while tasks are selected.
+    fn action_bar(&mut self, ui: &mut egui::Ui, today: NaiveDate) -> Option<Action> {
+        let mut op = None;
+        Frame::new()
+            .fill(blue().gamma_multiply(0.10))
+            .stroke(Stroke::new(1.0, blue().gamma_multiply(0.4)))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(12, 9))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(26.0);
+                    let n = self.selection.len();
+                    ui.label(RichText::new(format!("{n} selected")).family(fonts::bold()).color(text()));
+                    ui.add_space(8.0);
+                    for (label, d) in [
+                        ("Today", today),
+                        ("Tomorrow", today + chrono::Days::new(1)),
+                        ("Next week", next_monday(today)),
+                    ] {
+                        if ui.button(label).on_hover_text(format!("Due {}", d.format("%a %b %-d"))).clicked() {
+                            op = Some(BulkOp::Due(Some(d)));
+                        }
+                    }
+                    let d = self.bulk_date;
+                    let mut jd = jiff::civil::date(d.year() as i16, d.month() as i8, d.day() as i8);
+                    ui.add(egui_extras::DatePickerButton::new(&mut jd).id_salt("bulk_due").calendar_week(false))
+                        .on_hover_text("Pick a due date");
+                    if let Some(nd) = NaiveDate::from_ymd_opt(jd.year() as i32, jd.month() as u32, jd.day() as u32)
+                        && nd != d
+                    {
+                        self.bulk_date = nd;
+                        op = Some(BulkOp::Due(Some(nd)));
+                    }
+                    ui.menu_button("Move to list", |ui| {
+                        if self.cfg.lists.is_empty() {
+                            ui.label(RichText::new("Create a list with + next to LISTS first.").color(subtle()));
+                        }
+                        let from = match &self.view {
+                            View::List(l) => Some(l.clone()),
+                            _ => None,
+                        };
+                        for name in &self.cfg.lists {
+                            if from.as_ref() != Some(name) && ui.button(name).clicked() {
+                                op = Some(BulkOp::MoveToList { to: name.clone(), from: from.clone() });
+                            }
+                        }
+                    });
+                    if ui.button(RichText::new("✔ Complete").color(green())).clicked() {
+                        op = Some(BulkOp::Complete);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("✖ Clear").color(subtle())).frame(false))
+                            .on_hover_text("Clear selection (Esc)")
+                            .clicked()
+                        {
+                            self.selection.clear();
+                        }
+                    });
+                });
+            });
+        ui.add_space(10.0);
+        // `?` on an Option returns None from this function when nothing was clicked.
+        let op = op?;
+        Some(Action::Bulk(op, self.targets()))
     }
 
     fn add_draft(&mut self) {
@@ -980,19 +1234,53 @@ impl App {
             }
         }
 
+        // Remember the order rows are shown in, and drop selected tasks that are gone
+        // (completed, filtered out…).
+        self.order = groups.iter().flat_map(|(_, _, items)| items.iter().map(|t| task_key(t))).collect();
+        let shown: HashSet<&TaskKey> = self.order.iter().collect();
+        self.selection.retain(|k| shown.contains(k));
+        if self.cursor.as_ref().is_some_and(|c| !shown.contains(c)) {
+            self.cursor = None;
+        }
+
         let show_file = !self.cfg.group_by_file;
+        let group_by_file = self.cfg.group_by_file;
+        let mut click = None;
         let mut row = RowUi {
             meta: &self.meta,
             lists: &self.cfg.lists,
             title_edit: &mut self.title_edit,
             notes_edit: &mut self.notes_edit,
             expanded: &mut self.expanded,
+            selection: &self.selection,
+            cursor: self.cursor.as_ref(),
+            row_rects: &mut self.row_rects,
+            // `take` reads the flag and resets it to false in one step.
+            scroll_to_cursor: std::mem::take(&mut self.scroll_to_cursor),
+            click: &mut click,
         };
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (name, color, items) in &groups {
                 if !name.is_empty() {
                     ui.add_space(10.0);
-                    ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(*color));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).size(15.0).family(fonts::bold()).color(*color));
+                        if name == "Overdue" && !group_by_file {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                let link = ui
+                                    .add(
+                                        egui::Label::new(RichText::new("Reschedule all to today").size(12.5).color(blue()))
+                                            .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if link.clicked() {
+                                    let all: Vec<Task> = items.iter().map(|t| (*t).clone()).collect();
+                                    action = Some(Action::Bulk(BulkOp::Due(Some(today)), all));
+                                }
+                            });
+                        }
+                    });
                     let r = ui.available_rect_before_wrap();
                     ui.painter().hline(r.x_range(), r.top() + 2.0, Stroke::new(1.0, rule()));
                     ui.add_space(8.0);
@@ -1005,6 +1293,9 @@ impl App {
             }
             ui.add_space(20.0);
         });
+        if let Some(c) = click {
+            self.apply_click(c);
+        }
         action
     }
 
@@ -1477,6 +1768,12 @@ struct RowUi<'a> {
     title_edit: &'a mut Option<TitleEdit>,
     notes_edit: &'a mut Option<NotesEdit>,
     expanded: &'a mut Option<TaskKey>,
+    selection: &'a HashSet<TaskKey>,
+    cursor: Option<&'a TaskKey>,
+    row_rects: &'a mut HashMap<TaskKey, egui::Rect>,
+    scroll_to_cursor: bool,
+    /// Set when a row is clicked in a way that changes the selection.
+    click: &'a mut Option<RowClick>,
 }
 
 fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &mut RowUi) -> Option<Action> {
@@ -1486,8 +1783,35 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
     let meta = r.meta.get(t);
     let has_notes = meta.is_some_and(|m| !m.notes.trim().is_empty());
     let task_lists: Vec<String> = meta.map(|m| m.lists.clone()).unwrap_or_default();
+    let selected = r.selection.contains(&key);
+    let is_cursor = r.cursor == Some(&key);
+    // The row's size is only known after drawing it, so use where it was last frame.
+    // Registering this click area before the row's own widgets lets the checkbox, title
+    // and buttons keep their clicks; clicks on empty space land here.
+    if let Some(rect) = r.row_rects.get(&key).copied() {
+        let bg = ui.interact(rect, ui.scope_id().with(("row", &key)), Sense::click());
+        let fill = if selected {
+            Some(blue().gamma_multiply(0.16))
+        } else if is_cursor {
+            Some(hover())
+        } else if bg.hovered() {
+            Some(hover().gamma_multiply(0.5))
+        } else {
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
+        }
+        if is_cursor && r.scroll_to_cursor {
+            ui.scroll_to_rect(rect, None);
+        }
+        if bg.clicked() {
+            let m = ui.input(|i| i.modifiers);
+            *r.click = Some(RowClick { key: key.clone(), toggle: m.command, range: m.shift });
+        }
+    }
     ui.add_space(3.0);
-    ui.horizontal_top(|ui| {
+    let row = ui.horizontal_top(|ui| {
         let mut checked = false;
         let cb = ui.checkbox(&mut checked, "");
         if t.recurrence.is_some() {
@@ -1537,7 +1861,13 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
                     .on_hover_cursor(egui::CursorIcon::Text)
                     .on_hover_text("Click to rename. Right-click for more.");
                 if resp.clicked() {
-                    *r.title_edit = Some(TitleEdit { key: key.clone(), buf: t.description.clone(), focus: true });
+                    let m = ui.input(|i| i.modifiers);
+                    if m.command || m.shift {
+                        // Cmd/Shift-click selects instead of renaming.
+                        *r.click = Some(RowClick { key: key.clone(), toggle: m.command, range: m.shift });
+                    } else {
+                        *r.title_edit = Some(TitleEdit { key: key.clone(), buf: t.description.clone(), focus: true });
+                    }
                 }
                 resp.context_menu(|ui| {
                     if let Some(a) = task_menu(ui, t, &task_lists, r) {
@@ -1610,6 +1940,7 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
             }
         });
     });
+    r.row_rects.insert(key.clone(), row.response.rect.expand2(vec2(6.0, 3.0)));
     ui.add_space(3.0);
 
     if r.expanded.as_ref() == Some(&key)
@@ -2199,6 +2530,9 @@ impl eframe::App for App {
             self.expanded = None;
             self.notes_edit = None;
             self.title_edit = None;
+            self.selection.clear();
+            self.cursor = None;
+            self.anchor = None;
             self.shown_view = self.view.clone();
         }
 
@@ -2209,7 +2543,8 @@ impl eframe::App for App {
             .show(ui, |ui| self.sidebar(ui));
 
         let today = Local::now().date_naive();
-        let mut action = None;
+        // Keys are read before drawing so a shortcut (e.g. Esc) can't also reach a widget.
+        let mut action = self.list_keys(&ctx, today);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(main_bg()).inner_margin(Margin { left: 40, right: 40, top: 28, bottom: 0 }))
             .show(ui, |ui| {
@@ -2231,8 +2566,14 @@ impl eframe::App for App {
                     ui.add_space(6.0);
                     action = self.completed_list(ui, today);
                 } else {
-                    self.new_task_row(ui, today);
-                    action = self.task_list(ui, today);
+                    // While tasks are selected, the action bar takes the new task box's place.
+                    let bar = if self.selection.is_empty() {
+                        self.new_task_row(ui, today);
+                        None
+                    } else {
+                        self.action_bar(ui, today)
+                    };
+                    action = self.task_list(ui, today).or(bar).or(action.take());
                 }
             });
 
@@ -2253,12 +2594,18 @@ impl eframe::App for App {
                             .inner_margin(Margin::symmetric(16, 10))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let mut text = last.description.clone();
-                                    if text.chars().count() > 48 {
-                                        text = text.chars().take(47).collect::<String>() + "…";
-                                    }
+                                    let msg = match last.items.as_slice() {
+                                        [(_, _, one)] => {
+                                            let mut text = one.clone();
+                                            if text.chars().count() > 48 {
+                                                text = text.chars().take(47).collect::<String>() + "…";
+                                            }
+                                            format!("Completed \"{text}\"")
+                                        }
+                                        many => format!("Completed {} tasks", many.len()),
+                                    };
                                     glyph(ui, 14.0, Glyph::Done);
-                                    ui.label(RichText::new(format!("Completed \"{text}\"")).color(Color32::WHITE));
+                                    ui.label(RichText::new(msg).color(Color32::WHITE));
                                     ui.add_space(8.0);
                                     if ui
                                         .add(egui::Button::new(RichText::new("Undo").color(link())).frame(false))
