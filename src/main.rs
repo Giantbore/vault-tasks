@@ -911,10 +911,12 @@ impl App {
                     {
                         self.selection.clear();
                     }
-                    ui.with_layout(Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
-                        ui.set_min_height(26.0);
+                    // Top-aligned: a centered wrapping row stretches to fill all the height it's given.
+                    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
                         let n = self.selection.len();
-                        ui.label(RichText::new(format!("{n} selected")).family(fonts::bold()).color(text()));
+                        // A frameless, unclickable button: the same height as the others, so the text lines up.
+                        let label = RichText::new(format!("{n} selected")).family(fonts::bold()).color(text());
+                        ui.add(egui::Button::new(label).frame(false).sense(Sense::hover()));
                         ui.add_space(8.0);
                         for (label, d) in [
                             ("Today", today),
