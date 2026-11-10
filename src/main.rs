@@ -1,6 +1,7 @@
 mod fonts;
 mod menu;
 mod meta;
+mod natural_date;
 mod tasks;
 mod theme;
 
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 use fonts::BodyFont;
 use menu::Cmd;
 use meta::{MetaStore, TaskMeta};
+use natural_date::{end_of_week, next_monday};
 use tasks::{Priority, Task};
 use theme::*;
 
@@ -42,19 +44,6 @@ impl DefaultDue {
             DefaultDue::EndOfWeek => "End of week (Friday)",
         }
     }
-}
-
-/// Upcoming Friday (today if it is Friday; next week's on Sat/Sun).
-fn end_of_week(today: NaiveDate) -> NaiveDate {
-    let wd = today.weekday().num_days_from_monday() as u64;
-    let days = if wd <= 4 { 4 - wd } else { 11 - wd };
-    today + chrono::Days::new(days)
-}
-
-/// Next Monday (a week from today if today is Monday).
-fn next_monday(today: NaiveDate) -> NaiveDate {
-    let wd = today.weekday().num_days_from_monday() as u64;
-    today + chrono::Days::new(7 - wd)
 }
 
 const SOUND_EXTS: [&str; 6] = ["aiff", "aif", "wav", "mp3", "m4a", "caf"];
@@ -294,7 +283,27 @@ struct NewTask {
     text: String,
     due: Option<NaiveDate>,
     vault: usize,
+    /// The user picked or cleared the date by hand, so typed date phrases are ignored.
+    due_manual: bool,
+    /// Date found in the text last frame (to notice when it changes).
+    parsed: Option<NaiveDate>,
+    /// When the date chip was last updated from the text (drives a short highlight).
+    flash_at: Option<Instant>,
 }
+
+impl NewTask {
+    /// Clears the draft after adding, back to the default due date.
+    fn reset(&mut self, default_due: Option<NaiveDate>) {
+        self.text.clear();
+        self.due = default_due;
+        self.due_manual = false;
+        self.parsed = None;
+        self.flash_at = None;
+    }
+}
+
+/// How long the date chip glows after a typed date phrase sets it.
+const DATE_FLASH: f32 = 0.9;
 
 struct App {
     cfg: Config,
@@ -345,7 +354,7 @@ impl App {
             search: String::new(),
             error: None,
             new_exclude: String::new(),
-            draft: NewTask { text: String::new(), due: None, vault: 0 },
+            draft: NewTask { text: String::new(), due: None, vault: 0, due_manual: false, parsed: None, flash_at: None },
             focus_new: false,
             menu: menu::MenuBar::install(&cc.egui_ctx),
             range: Range::Week,
@@ -554,7 +563,14 @@ impl App {
             _ => None,
         };
         let id = list.as_ref().map(|_| tasks::new_block_id());
-        let result = tasks::add_task(&root, &self.draft.text, self.draft.due, sched, id.as_deref()).and_then(|()| {
+        // A typed date phrase ("tomorrow", "nov 15") set the date, so leave it out of the
+        // task's name. If the date was picked by hand, the text is kept exactly as typed.
+        let text = if self.draft.due_manual {
+            self.draft.text.clone()
+        } else {
+            natural_date::parse(&self.draft.text, today).title
+        };
+        let result = tasks::add_task(&root, &text, self.draft.due, sched, id.as_deref()).and_then(|()| {
             match (&id, &list) {
                 (Some(id), Some(l)) => self.meta.update(&root, id, |m| m.lists.push(l.clone())),
                 _ => Ok(()),
@@ -562,8 +578,7 @@ impl App {
         });
         match result {
             Ok(()) => {
-                self.draft.text.clear();
-                self.draft.due = self.cfg.default_due_date(today);
+                self.draft.reset(self.cfg.default_due_date(today));
                 self.error = None;
                 self.focus_new = true;
                 self.rescan();
@@ -789,6 +804,15 @@ impl App {
         if self.draft.vault >= self.cfg.vaults.len() {
             self.draft.vault = 0;
         }
+        // Natural language date: look for a date phrase in the text every frame, and
+        // update the date chip when it changes (unless the date was picked by hand).
+        let parsed = natural_date::parse(&self.draft.text, today);
+        if !self.draft.due_manual && parsed.due != self.draft.parsed {
+            self.draft.due = parsed.due.or(self.cfg.default_due_date(today));
+            self.draft.flash_at = parsed.due.map(|_| Instant::now());
+            self.draft.parsed = parsed.due;
+        }
+        let highlight_phrase = !self.draft.due_manual;
         Frame::new()
             .fill(field_bg())
             .stroke(Stroke::new(1.0, field_stroke()))
@@ -809,8 +833,31 @@ impl App {
                         View::List(l) => format!("New task in {l}"),
                         _ => "New task".to_string(),
                     };
+                    // Draws the text with the date phrase in blue, so it's clear which words
+                    // become the due date (and will be left out of the task's name).
+                    // `move` copies `today` and `highlight_phrase` into the closure.
+                    let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                        let text = buf.as_str();
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        let plain = egui::text::TextFormat::simple(font.clone(), theme::text());
+                        let mut job = egui::text::LayoutJob::default();
+                        let phrase = natural_date::parse(text, today).phrase.filter(|_| highlight_phrase);
+                        match phrase {
+                            Some(r) => {
+                                let mut date = egui::text::TextFormat::simple(font, blue());
+                                date.background = blue().gamma_multiply(0.12);
+                                job.append(&text[..r.start], 0.0, plain.clone());
+                                job.append(&text[r.clone()], 0.0, date);
+                                job.append(&text[r.end..], 0.0, plain);
+                            }
+                            None => job.append(text, 0.0, plain),
+                        }
+                        job.wrap.max_width = wrap_width;
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.draft.text)
+                            .layouter(&mut layouter)
                             .hint_text(hint.as_str())
                             .frame(Frame::NONE)
                             .font(egui::TextStyle::Body)
@@ -845,11 +892,32 @@ impl App {
                             Some(d) => {
                                 if ui.add(egui::Button::new("✖").frame(false)).on_hover_text("Clear due date").clicked() {
                                     self.draft.due = None;
+                                    self.draft.due_manual = true;
                                 } else {
                                     let mut jd = jiff::civil::date(d.year() as i16, d.month() as i8, d.day() as i8);
-                                    ui.add(egui_extras::DatePickerButton::new(&mut jd).id_salt("due").calendar_week(false));
-                                    if let Some(nd) = NaiveDate::from_ymd_opt(jd.year() as i32, jd.month() as u32, jd.day() as u32) {
+                                    let chip = ui.add(egui_extras::DatePickerButton::new(&mut jd).id_salt("due").calendar_week(false));
+                                    if let Some(nd) = NaiveDate::from_ymd_opt(jd.year() as i32, jd.month() as u32, jd.day() as u32)
+                                        && nd != *d
+                                    {
+                                        // Picked in the calendar: this date wins over typed phrases.
                                         *d = nd;
+                                        self.draft.due_manual = true;
+                                        self.draft.flash_at = None;
+                                    }
+                                    // Short blue glow around the chip after a typed phrase changed it.
+                                    if let Some(t) = self.draft.flash_at {
+                                        let age = t.elapsed().as_secs_f32();
+                                        if age < DATE_FLASH {
+                                            let alpha = 1.0 - age / DATE_FLASH;
+                                            ui.painter().rect(
+                                                chip.rect.expand(2.0),
+                                                CornerRadius::same(6),
+                                                blue().gamma_multiply(0.18 * alpha),
+                                                Stroke::new(1.5, blue().gamma_multiply(alpha)),
+                                                egui::StrokeKind::Outside,
+                                            );
+                                            ui.ctx().request_repaint();
+                                        }
                                     }
                                 }
                             }
@@ -859,6 +927,7 @@ impl App {
                                     .clicked()
                                 {
                                     self.draft.due = Some(today);
+                                    self.draft.due_manual = true;
                                 }
                             }
                         }
