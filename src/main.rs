@@ -172,11 +172,10 @@ impl Config {
     }
 
     fn load() -> Self {
-        if let Ok(s) = std::fs::read_to_string(Self::path()) {
-            if let Ok(c) = serde_json::from_str(&s) {
+        if let Ok(s) = std::fs::read_to_string(Self::path())
+            && let Ok(c) = serde_json::from_str(&s) {
                 return c;
             }
-        }
         // First run: look for Obsidian vaults in iCloud.
         let mut c = Config::default();
         if let Some(home) = dirs::home_dir() {
@@ -680,11 +679,10 @@ impl App {
                 }
             });
         }
-        if self.list_edit.as_ref().is_some_and(|e| e.from.is_none()) {
-            if let Some(r) = self.list_name_field(ui) {
+        if self.list_edit.as_ref().is_some_and(|e| e.from.is_none())
+            && let Some(r) = self.list_name_field(ui) {
                 rename = Some(r);
             }
-        }
         if self.cfg.lists.is_empty() && self.list_edit.is_none() {
             let r = ui.add(
                 egui::Label::new(RichText::new("+ New list").size(13.0).color(faint())).sense(Sense::click()),
@@ -781,11 +779,10 @@ impl App {
     }
 
     fn new_task_row(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
-        if let View::Vault(name) = &self.view {
-            if let Some(i) = self.cfg.vaults.iter().position(|v| &vault_name(v) == name) {
+        if let View::Vault(name) = &self.view
+            && let Some(i) = self.cfg.vaults.iter().position(|v| &vault_name(v) == name) {
                 self.draft.vault = i;
             }
-        }
         if self.draft.vault >= self.cfg.vaults.len() {
             self.draft.vault = 0;
         }
@@ -999,14 +996,12 @@ impl App {
                 self.cfg.vaults.remove(i);
                 changed = true;
             }
-            if ui.button("+ Add vault folder…").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    if !self.cfg.vaults.contains(&p) {
+            if ui.button("+ Add vault folder…").clicked()
+                && let Some(p) = rfd::FileDialog::new().pick_folder()
+                    && !self.cfg.vaults.contains(&p) {
                         self.cfg.vaults.push(p);
                         changed = true;
                     }
-                }
-            }
 
             ui.add_space(20.0);
             section(ui, "Excluded folders", "Any file whose path contains one of these is skipped (e.g. Recipes, Grocery lists, etc.).");
@@ -1092,11 +1087,10 @@ impl App {
                     }
                     changed = true;
                 }
-                if let Some(s) = &self.cfg.chime {
-                    if ui.button("▶ Play").clicked() {
+                if let Some(s) = &self.cfg.chime
+                    && ui.button("▶ Play").clicked() {
                         play_sound(s);
                     }
-                }
             });
             ui.horizontal(|ui| {
                 ui.label(
@@ -1104,12 +1098,11 @@ impl App {
                         .size(12.0)
                         .color(subtle()),
                 );
-                if ui.small_button("Open folder").clicked() {
-                    if let Some(dir) = user_sounds_dir() {
+                if ui.small_button("Open folder").clicked()
+                    && let Some(dir) = user_sounds_dir() {
                         let _ = std::fs::create_dir_all(&dir);
                         let _ = std::process::Command::new("open").arg(dir).spawn();
                     }
-                }
             });
 
             ui.add_space(20.0);
@@ -1193,11 +1186,10 @@ impl App {
         });
         if changed {
             self.cfg.save();
-            if let View::Vault(v) = &self.view {
-                if !self.cfg.vaults.iter().any(|p| &vault_name(p) == v) {
+            if let View::Vault(v) = &self.view
+                && !self.cfg.vaults.iter().any(|p| &vault_name(p) == v) {
                     self.view = View::All;
                 }
-            }
             self.rescan();
         }
     }
@@ -1324,7 +1316,7 @@ fn refresh_button(ui: &mut egui::Ui, refreshed_at: Option<Instant>, task_count: 
     }
     let c = rect.center();
     match since {
-        Some(s) if s >= REFRESH_SPIN && s < REFRESH_SPIN + REFRESH_DONE => {
+        Some(s) if (REFRESH_SPIN..REFRESH_SPIN + REFRESH_DONE).contains(&s) => {
             paint_glyph(p, c, 15.0, Glyph::Done);
             ui.label(RichText::new("Updated").size(12.5).color(subtle()));
         }
@@ -1548,11 +1540,10 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
     });
     ui.add_space(3.0);
 
-    if r.expanded.as_ref() == Some(&key) {
-        if let Some(a) = details_panel(ui, t, meta, &task_lists, r) {
+    if r.expanded.as_ref() == Some(&key)
+        && let Some(a) = details_panel(ui, t, meta, &task_lists, r) {
             action = Some(a);
         }
-    }
     action
 }
 
@@ -1851,15 +1842,14 @@ fn md_inline(s: &str, size: f32, color: Color32, bold_base: bool) -> egui::text:
             }
             if c == '[' {
                 let rest: String = chars[i + 1..].iter().collect();
-                if let Some(close) = rest.find("](") {
-                    if let Some(end) = rest[close + 2..].find(')') {
+                if let Some(close) = rest.find("](")
+                    && let Some(end) = rest[close + 2..].find(')') {
                         push(&mut job, &mut buf, bold, italic, code, false);
                         buf.push_str(&rest[..close]);
                         push(&mut job, &mut buf, bold, italic, code, true);
                         i += 1 + rest[..close + 2 + end + 1].chars().count();
                         continue;
                     }
-                }
             }
         }
         buf.push(c);

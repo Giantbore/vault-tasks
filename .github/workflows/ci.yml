@@ -1,0 +1,27 @@
+# Builds and tests the app on every push and pull request.
+# There are no prebuilt downloads: the app isn't signed, so people build it from source.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Clippy
+        run: cargo clippy
+
+      - name: Test
+        run: cargo test
