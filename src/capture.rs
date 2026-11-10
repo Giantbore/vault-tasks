@@ -28,6 +28,9 @@ impl Hotkey {
         // the ID to the UI and wakes it, even if the window is in the background.
         GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
             if e.state() == HotKeyState::Pressed {
+                // If the app is hidden or minimized, nothing gets drawn, so make it
+                // drawable first (see native.rs). This handler runs on the main thread.
+                crate::native::reveal_for_capture();
                 let _ = tx.send(e.id());
                 repaint.request_repaint();
             }

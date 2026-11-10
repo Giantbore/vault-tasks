@@ -13,6 +13,8 @@ egui_extras = { version = "0.37.0", features = ["datepicker"] }
 global-hotkey = "0.10.0"
 jiff = "0.2.39"
 muda = "0.21.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
 percent-encoding = "2.3.2"
 regex = "1.13.1"
 rfd = "0.18.0"

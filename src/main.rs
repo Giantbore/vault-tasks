@@ -2,6 +2,7 @@ mod capture;
 mod fonts;
 mod menu;
 mod meta;
+mod native;
 mod natural_date;
 mod tasks;
 mod theme;
@@ -127,7 +128,8 @@ struct Config {
     capture_shortcut: String,
     /// Vault quick-capture tasks go to (None: the first vault).
     capture_vault: Option<PathBuf>,
-    /// Note in that vault they're added to. Created if it doesn't exist.
+    /// Note in that vault they're added to (default: the same note as tasks added in the app).
+    /// Created if it doesn't exist.
     capture_note: String,
 }
 
@@ -147,7 +149,7 @@ impl Default for Config {
             lists: Vec::new(),
             capture_shortcut: capture::DEFAULT_SHORTCUT.into(),
             capture_vault: None,
-            capture_note: "Inbox.md".into(),
+            capture_note: tasks::INBOX_FILE.into(),
         }
     }
 }
@@ -924,7 +926,10 @@ impl App {
         });
         match outcome {
             CaptureOutcome::Typing => {}
-            CaptureOutcome::Cancel => self.capture = None,
+            CaptureOutcome::Cancel => {
+                self.capture = None;
+                native::restore_after_capture();
+            }
             CaptureOutcome::Save => {
                 let text = self.capture.as_ref().map(|c| c.text.clone()).unwrap_or_default();
                 let parsed = natural_date::parse(&text, today);
@@ -942,6 +947,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.capture = None;
+                        native::restore_after_capture();
                         self.rescan();
                     }
                     Err(e) => {
@@ -1622,7 +1628,7 @@ impl App {
                 });
                 ui.label("/");
                 changed |= ui
-                    .add(egui::TextEdit::singleline(&mut self.cfg.capture_note).hint_text("Inbox.md").desired_width(180.0))
+                    .add(egui::TextEdit::singleline(&mut self.cfg.capture_note).hint_text(tasks::INBOX_FILE).desired_width(180.0))
                     .lost_focus();
             });
 
@@ -2110,7 +2116,9 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
                         }
                     }
                     for name in &task_lists {
-                        list_tag(ui, name);
+                        if list_tag(ui, name) {
+                            out = Some(Action::ToggleList(t.clone(), name.clone(), false));
+                        }
                     }
                     out
                 });
@@ -2134,6 +2142,12 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
             {
                 action = Some(Action::Star(t.clone(), !starred));
             }
+            // Laid out right to left: star, notes, then the date chip, whose width varies.
+            // Keeping it leftmost stops the notes button from shifting between rows.
+            let open = r.expanded.as_ref() == Some(&key);
+            if notes_button(ui, has_notes, open).clicked() {
+                toggle_expanded(r, &key);
+            }
             let resp = match t.due {
                 Some(d) => date_chip(ui, d, today),
                 None => ui
@@ -2142,10 +2156,6 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
             };
             if let Some(a) = due_menu(&resp, t, today) {
                 action = Some(a);
-            }
-            let open = r.expanded.as_ref() == Some(&key);
-            if notes_button(ui, has_notes, open).clicked() {
-                toggle_expanded(r, &key);
             }
         });
     });
@@ -2202,15 +2212,31 @@ fn text_format(size: f32, color: Color32, bold: bool) -> egui::text::TextFormat 
     egui::text::TextFormat { font_id: FontId::new(size, family), color, ..Default::default() }
 }
 
-/// Small tag showing a list the task belongs to.
-fn list_tag(ui: &mut egui::Ui, name: &str) {
+/// Small tag showing a list the task belongs to, with an × to remove it.
+/// Returns true when the × is clicked.
+fn list_tag(ui: &mut egui::Ui, name: &str) -> bool {
     let galley = ui.painter().layout_no_wrap(name.to_string(), FontId::proportional(11.0), blue());
-    let size = galley.size() + vec2(16.0, 2.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(4), blue().gamma_multiply(0.12));
-    let dot = egui::pos2(rect.left() + 6.0, rect.center().y);
-    ui.painter().circle_filled(dot, 1.8, blue());
-    ui.painter().galley(egui::pos2(rect.left() + 11.0, rect.center().y - galley.size().y / 2.0), galley, blue());
+    // Room on the right for a small ×.
+    let size = galley.size() + vec2(28.0, 2.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let x_area = egui::Rect::from_min_max(egui::pos2(rect.right() - 15.0, rect.top()), rect.max);
+    let over_x = resp.hover_pos().is_some_and(|p| x_area.contains(p));
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(4), blue().gamma_multiply(if resp.hovered() { 0.2 } else { 0.12 }));
+    p.circle_filled(egui::pos2(rect.left() + 6.0, rect.center().y), 1.8, blue());
+    p.galley(egui::pos2(rect.left() + 11.0, rect.center().y - galley.size().y / 2.0), galley, blue());
+    // The × is faint until the tag is hovered, and bright when the pointer is on it.
+    let alpha = if over_x { 1.0 } else if resp.hovered() { 0.6 } else { 0.3 };
+    let c = x_area.center();
+    let stroke = Stroke::new(1.2, blue().gamma_multiply(alpha));
+    p.line_segment([c + vec2(-2.5, -2.5), c + vec2(2.5, 2.5)], stroke);
+    p.line_segment([c + vec2(-2.5, 2.5), c + vec2(2.5, -2.5)], stroke);
+    if over_x {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let resp = resp.on_hover_text(if over_x { format!("Remove from {name}") } else { name.to_string() });
+    // Only a click on the × removes the task from the list.
+    resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| x_area.contains(p))
 }
 
 /// Painted notes icon: lines of text, blue when the task has notes.
@@ -2325,7 +2351,9 @@ fn details_panel(ui: &mut egui::Ui, t: &Task, meta: Option<&TaskMeta>, task_list
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Lists").size(11.5).family(fonts::bold()).color(subtle()));
                     for name in task_lists {
-                        list_tag(ui, name);
+                        if list_tag(ui, name) {
+                            out = Some(Action::ToggleList(t.clone(), name.clone(), false));
+                        }
                     }
                     let add = ui
                         .add(egui::Button::new(RichText::new("+ Add to list").size(12.0).color(blue())).frame(false))

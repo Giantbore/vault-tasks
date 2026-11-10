@@ -25,7 +25,7 @@ A small native macOS app that gathers every open task from your Obsidian vaults 
 ### Adding tasks
 - Type in the new task box and press Enter. Tasks go to `Vault Tasks.md` at the root of the chosen vault.
 - **Natural language dates:** a phrase at the start or end of the task sets the due date and is left out of the name. "Send report fri" becomes "Send report" due Friday. It understands today, tomorrow, weekday names, next week, next monday, in 3 days, in 2 weeks, nov 15 and 11/15. A date picked in the calendar wins.
-- **Quick capture:** press Ctrl+Option+Space anywhere on your Mac to open a small window, type a task and press Enter. It's added to an Inbox note in the vault you pick in Settings. The shortcut can be changed.
+- **Quick capture:** press Ctrl+Option+Space anywhere on your Mac to open a small window, type a task and press Enter. It's added to `Vault Tasks.md`, the same note as tasks added in the app, in the vault you pick in Settings. The note and shortcut can be changed. It works even when the app is hidden or minimized.
 
 ### Notes and lists
 - **Notes:** click the ≡ button on a task to add notes. Markdown works: bullets, checkboxes, **bold**, *italic*, `code`, headings and links.
@@ -86,7 +86,7 @@ Because you built the app on your own Mac, macOS opens it without the "unidentif
 1. Open the app. It looks for vaults in Obsidian's iCloud folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents`).
 2. If your vaults are somewhere else, or none were found, open **Settings** (⌘,) and click **Add vault folder…** for each vault.
 3. Optional: under **Excluded folders**, add folders to skip, such as templates or recipes.
-4. Under **Quick capture**, pick the vault and note that captured tasks go to. The default is `Inbox.md` in your first vault, and the note is created the first time you capture a task. You can also change the shortcut there, written like `ctrl+option+space` or `cmd+shift+k`. macOS doesn't need any extra permission for it. If another app already uses the shortcut, Settings says so.
+4. Under **Quick capture**, pick the vault and note that captured tasks go to. The default is `Vault Tasks.md` in your first vault, the same note tasks added in the app go to. It's created the first time you add a task. You can also change the shortcut there, written like `ctrl+option+space` or `cmd+shift+k`. macOS doesn't need any extra permission for it. If another app already uses the shortcut, Settings says so.
 5. Optional: Settings shows whether the Tasks and Advanced URI plugins are installed in each vault.
 
 Settings are saved to `~/Library/Application Support/vault-tasks/config.json`.
