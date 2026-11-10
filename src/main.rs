@@ -1496,7 +1496,7 @@ impl App {
             scroll_to_cursor: std::mem::take(&mut self.scroll_to_cursor),
             click: &mut click,
         };
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        list_scroll(ui, |ui| {
             for (name, color, items) in &groups {
                 if !name.is_empty() {
                     ui.add_space(10.0);
@@ -1550,7 +1550,7 @@ impl App {
             return None;
         }
         let mut action = None;
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        list_scroll(ui, |ui| {
             let mut current: Option<NaiveDate> = None;
             for t in visible {
                 if t.done != current {
@@ -1581,7 +1581,7 @@ impl App {
 
     fn settings(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        list_scroll(ui, |ui| {
             section(ui, "Vault folders", "Each folder is scanned for .md files with open tasks.");
             let mut remove = None;
             for (i, v) in self.cfg.vaults.iter().enumerate() {
@@ -2240,6 +2240,24 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
             action = Some(a);
         }
     action
+}
+
+/// Room taken from the page's right margin for the scroll bar, so it sits beside the
+/// rows instead of on top of the stars.
+const SCROLLBAR_GUTTER: f32 = 22.0;
+
+/// A scrolling page area whose scroll bar is pushed out into the right margin.
+fn list_scroll(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let mut rect = ui.available_rect_before_wrap();
+    rect.max.x += SCROLLBAR_GUTTER;
+    // `scope_builder` lays out a child area in a rect we choose: here, a bit wider than the page.
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            // The same width back on the inside, so rows end where they did before.
+            let margin = Margin { right: SCROLLBAR_GUTTER as i8, ..Default::default() };
+            Frame::new().inner_margin(margin).show(ui, add);
+        });
+    });
 }
 
 /// What dragging a row carries: the whole selection if the row is selected, else just that task.
