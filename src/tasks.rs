@@ -389,28 +389,6 @@ pub fn add_task_in(
     if text.is_empty() {
         return Err("Task is empty".into());
     }
-    let note = note.trim().trim_start_matches('/');
-    if note.is_empty() || note.split('/').any(|p| p == "..") {
-        return Err("Pick a note name inside the vault".into());
-    }
-    let mut path = vault_root.join(note);
-    if path.extension().and_then(|e| e.to_str()) != Some("md") {
-        path.set_extension("md");
-    }
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let mut content = fs::read_to_string(&path).unwrap_or_else(|_| {
-        if note == INBOX_FILE {
-            "# Vault Tasks\n\nTasks created in the Vault Tasks app.\n\n".to_string()
-        } else {
-            let title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            format!("# {title}\n\n")
-        }
-    });
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
     let mut line = format!("- [ ] {} ➕ {}", text, ymd(Local::now().date_naive()));
     if let Some(d) = scheduled {
         line.push_str(&format!(" ⏳ {}", ymd(d)));
@@ -421,9 +399,63 @@ pub fn add_task_in(
     if let Some(id) = block_id {
         line.push_str(&format!(" ^{id}"));
     }
-    content.push_str(&line);
+    append_line(vault_root, note, &line)
+}
+
+/// The Markdown file for `note` inside the vault, refusing paths that leave it.
+fn note_path(vault_root: &Path, note: &str) -> Result<PathBuf, String> {
+    let note = note.trim().trim_start_matches('/');
+    if note.is_empty() || note.split('/').any(|p| p == "..") {
+        return Err("Pick a note name inside the vault".into());
+    }
+    let mut path = vault_root.join(note);
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        path.set_extension("md");
+    }
+    Ok(path)
+}
+
+/// Adds one line at the end of a note, creating the note (with a heading) if needed.
+fn append_line(vault_root: &Path, note: &str, line: &str) -> Result<(), String> {
+    let path = note_path(vault_root, note)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut content = fs::read_to_string(&path).unwrap_or_else(|_| {
+        if path == vault_root.join(INBOX_FILE) {
+            "# Vault Tasks\n\nTasks created in the Vault Tasks app.\n\n".to_string()
+        } else {
+            let title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            format!("# {title}\n\n")
+        }
+    });
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(line);
     content.push('\n');
     fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+/// Moves a task to another vault: adds the same line (checkbox, text, dates, priority,
+/// recurrence and block ID) to `note` in `dest_root`, then deletes it from its old note.
+/// If the delete fails, the new note is put back as it was, so the task never ends up
+/// in both vaults.
+pub fn move_task(task: &Task, dest_root: &Path, note: &str) -> Result<(), String> {
+    let caps = TASK_RE.captures(&task.raw_line).ok_or("Line is no longer a task")?;
+    // Written at the top level of the note, without the old indentation or list number.
+    let line = format!("- [{}] {}", &caps[2], caps[4].trim());
+    let path = note_path(dest_root, note)?;
+    let before = fs::read(&path).ok();
+    append_line(dest_root, note, &line)?;
+    if let Err(e) = delete_task(task) {
+        let _ = match before {
+            Some(b) => fs::write(&path, b),
+            None => fs::remove_file(&path),
+        };
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -577,5 +609,27 @@ mod tests {
         fs::write(&f, "# H\n- [ ] B changed\n").unwrap();
         assert!(delete_task(&t).is_err());
         assert_eq!(fs::read_to_string(&f).unwrap(), "# H\n- [ ] B changed\n");
+    }
+
+    #[test]
+    fn moves_between_vaults() {
+        let base = std::env::temp_dir().join("vt-test6");
+        let _ = fs::remove_dir_all(&base);
+        let (a, b) = (base.join("A"), base.join("B"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("n.md"), "# H\n- [ ] Keep\n\t- [/] Move me ⏫ 📅 2026-01-01 ^vt-abc\n").unwrap();
+        let t = scan_vault(&a, &[]).into_iter().find(|t| t.description == "Move me").unwrap();
+        move_task(&t, &b, INBOX_FILE).unwrap();
+        assert_eq!(fs::read_to_string(a.join("n.md")).unwrap(), "# H\n- [ ] Keep\n");
+        let moved = scan_vault(&b, &[]).pop().unwrap();
+        assert_eq!(moved.raw_line, "- [/] Move me ⏫ 📅 2026-01-01 ^vt-abc");
+        assert!(moved.in_progress);
+        // A task changed since the scan isn't moved, and the other vault is left as it was.
+        let t = scan_vault(&a, &[]).pop().unwrap();
+        fs::write(a.join("n.md"), "# H\n- [ ] Keep edited\n").unwrap();
+        let before = fs::read_to_string(b.join(INBOX_FILE)).unwrap();
+        assert!(move_task(&t, &b, INBOX_FILE).is_err());
+        assert_eq!(fs::read_to_string(b.join(INBOX_FILE)).unwrap(), before);
     }
 }

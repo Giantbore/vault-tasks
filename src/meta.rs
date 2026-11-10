@@ -17,11 +17,14 @@ pub struct TaskMeta {
     /// Names of the app lists this task belongs to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lists: Vec<String>,
+    /// Position set by dragging the task within its group (lower is higher up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i64>,
 }
 
 impl TaskMeta {
     fn is_empty(&self) -> bool {
-        self.notes.trim().is_empty() && self.lists.is_empty()
+        self.notes.trim().is_empty() && self.lists.is_empty() && self.rank.is_none()
     }
 }
 

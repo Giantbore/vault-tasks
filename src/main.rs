@@ -49,56 +49,42 @@ impl DefaultDue {
     }
 }
 
-const SOUND_EXTS: [&str; 6] = ["aiff", "aif", "wav", "mp3", "m4a", "caf"];
-const SYSTEM_SOUNDS: &str = "/System/Library/Sounds";
-
-/// Your own sounds: ~/Library/Sounds (macOS also offers these as alert sounds).
-fn user_sounds_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join("Library/Sounds"))
+/// Sounds built into the app.
+#[derive(Clone, Copy)]
+enum Sound {
+    /// Completing a task.
+    Bell,
+    /// Starring a task.
+    Ding,
 }
 
-fn sounds_in(dir: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| SOUND_EXTS.contains(&e.to_lowercase().as_str()))
-        })
-        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
-        .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.dedup();
-    names
-}
-
-/// (your sounds, system sounds)
-fn list_sounds() -> (Vec<String>, Vec<String>) {
-    let mine = user_sounds_dir().map(|d| sounds_in(&d)).unwrap_or_default();
-    (mine, sounds_in(std::path::Path::new(SYSTEM_SOUNDS)))
-}
-
-/// Finds a sound by name, preferring your own folder over the system one.
-fn find_sound(name: &str) -> Option<PathBuf> {
-    let dirs = user_sounds_dir().into_iter().chain([PathBuf::from(SYSTEM_SOUNDS)]);
-    for dir in dirs {
-        for ext in SOUND_EXTS {
-            let p = dir.join(format!("{name}.{ext}"));
-            if p.is_file() {
-                return Some(p);
-            }
+impl Sound {
+    fn file(self) -> (&'static str, &'static [u8]) {
+        match self {
+            Sound::Bell => ("Bell.mp3", include_bytes!("../assets/sounds/Bell.mp3")),
+            Sound::Ding => ("Ding.mp3", include_bytes!("../assets/sounds/Ding.mp3")),
         }
     }
-    None
 }
 
-fn play_sound(name: &str) {
-    let Some(path) = find_sound(name) else { return };
-    // Wait on a background thread so the process is reaped without blocking the UI.
+/// Plays a built-in sound. `afplay` needs a file, so each sound is copied once from the
+/// app itself into its cache folder (and again if the app's copy changes).
+fn play(sound: Sound) {
+    let (name, bytes) = sound.file();
+    // Runs on a background thread so the UI never waits on the disk or the player.
     std::thread::spawn(move || {
+        let dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("vault-tasks");
+        let path = dir.join(name);
+        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+            // Write to a temporary name first so a sound playing at the same time never reads half a file.
+            let tmp = dir.join(format!("{name}.tmp"));
+            let ok = std::fs::create_dir_all(&dir).is_ok()
+                && std::fs::write(&tmp, bytes).is_ok()
+                && std::fs::rename(&tmp, &path).is_ok();
+            if !ok {
+                return;
+            }
+        }
         let _ = std::process::Command::new("afplay").arg(path).status();
     });
 }
@@ -119,8 +105,10 @@ struct Config {
     text_size: usize,
     default_due: DefaultDue,
     default_due_days: u32,
-    /// Sound played when a task is completed; None = off.
-    chime: Option<String>,
+    /// Play the built-in sounds: a bell on completing a task, a ding on starring one.
+    sounds: bool,
+    /// The vault last used for new tasks in each view ("All", "Starred", "list:<name>").
+    vault_for: std::collections::BTreeMap<String, PathBuf>,
     appearance: Appearance,
     /// Custom lists shown in the sidebar, in order. Membership is stored in each vault's .vault-tasks.json.
     lists: Vec<String>,
@@ -144,7 +132,8 @@ impl Default for Config {
             text_size: fonts::DEFAULT_SIZE,
             default_due: DefaultDue::None,
             default_due_days: 3,
-            chime: Some("Glass".into()),
+            sounds: true,
+            vault_for: Default::default(),
             appearance: Appearance::System,
             lists: Vec::new(),
             capture_shortcut: capture::DEFAULT_SHORTCUT.into(),
@@ -258,6 +247,8 @@ enum Action {
     Bulk(BulkOp, Vec<Task>),
     /// Ask before deleting these tasks (shows the confirmation dialog).
     AskDelete(Vec<Task>),
+    /// New order for the tasks of one group, top to bottom (from dragging a task).
+    Reorder(Vec<Task>),
 }
 
 /// A change that can be applied to many tasks at once.
@@ -269,6 +260,8 @@ enum BulkOp {
     MoveToList { to: String, from: Option<String> },
     /// Remove the task's line from its note.
     Delete,
+    /// Move the task's line to the new-task note of another vault (by its folder).
+    MoveToVault(PathBuf),
 }
 
 /// Drag-and-drop payload: the tasks being dragged onto a list in the sidebar.
@@ -407,6 +400,16 @@ enum CaptureOutcome {
     Save,
 }
 
+/// Which views remember the vault for new tasks: All, Starred and each list.
+fn vault_memory_key(view: &View) -> Option<String> {
+    match view {
+        View::All => Some("All".into()),
+        View::Today => Some("Starred".into()),
+        View::List(l) => Some(format!("list:{l}")),
+        _ => None,
+    }
+}
+
 fn vault_name(p: &std::path::Path) -> String {
     p.file_name().unwrap_or_default().to_string_lossy().to_string()
 }
@@ -454,6 +457,7 @@ impl App {
             confirm_delete: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
+        app.recall_vault();
         app.rescan();
         app
     }
@@ -605,6 +609,14 @@ impl App {
                 self.confirm_delete = (!items.is_empty()).then(|| items.clone());
                 return;
             }
+            Action::Reorder(items) => items.iter().enumerate().try_for_each(|(i, t)| {
+                let rank = Some(i as i64);
+                if self.meta.get(t).is_some_and(|m| m.rank == rank) {
+                    return Ok(());
+                }
+                let id = tasks::ensure_block_id(t)?;
+                self.meta.update(&t.vault_root, &id, |m| m.rank = rank)
+            }),
             Action::Reopen(t) => tasks::uncomplete_task(t),
             Action::Star(t, on) => tasks::set_scheduled(t, on.then_some(today)),
             Action::SetDue(t, d) => tasks::set_due(t, *d),
@@ -632,11 +644,21 @@ impl App {
         match result {
             Ok(()) => {
                 self.error = None;
+                if matches!(action, Action::Star(_, true)) {
+                    self.chime(Sound::Ding);
+                }
                 if !matches!(action, Action::Open(_)) {
                     self.rescan();
                 }
             }
             Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Plays a built-in sound, unless sounds are turned off in Settings.
+    fn chime(&self, sound: Sound) {
+        if self.cfg.sounds {
+            play(sound);
         }
     }
 
@@ -653,7 +675,7 @@ impl App {
         let mut failed: Vec<String> = Vec::new();
         let mut completed = Vec::new();
         let mut items: Vec<&Task> = items.iter().collect();
-        if matches!(op, BulkOp::Delete) {
+        if matches!(op, BulkOp::Delete | BulkOp::MoveToVault(_)) {
             // Delete from the bottom of each file up, so removing one line doesn't
             // shift the line numbers of the others still to go.
             items.sort_by(|a, b| (&a.file, std::cmp::Reverse(a.line)).cmp(&(&b.file, std::cmp::Reverse(b.line))));
@@ -675,6 +697,18 @@ impl App {
                     Some(id) => self.meta.update(&t.vault_root, id, |m| *m = TaskMeta::default()),
                     None => Ok(()),
                 }),
+                BulkOp::MoveToVault(dest) if *dest == t.vault_root => Ok(()),
+                BulkOp::MoveToVault(dest) => {
+                    // Notes, lists and position travel with the task to the other vault's data file.
+                    let meta = self.meta.get(t).cloned();
+                    tasks::move_task(t, dest, tasks::INBOX_FILE).and_then(|()| match (&t.block_id, meta) {
+                        (Some(id), Some(m)) => {
+                            self.meta.update(dest, id, |d| *d = m)?;
+                            self.meta.update(&t.vault_root, id, |d| *d = TaskMeta::default())
+                        }
+                        _ => Ok(()),
+                    })
+                }
                 BulkOp::MoveToList { to, from } => self.edit_lists(t, |lists| {
                     if let Some(from) = from {
                         lists.retain(|l| l != from);
@@ -689,9 +723,7 @@ impl App {
             }
         }
         if !completed.is_empty() {
-            if let Some(s) = &self.cfg.chime {
-                play_sound(s);
-            }
+            self.chime(Sound::Bell);
             self.last_completed = Some(LastCompleted { items: completed, at: Instant::now() });
         }
         self.error = match failed.len() {
@@ -869,51 +901,62 @@ impl App {
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_min_height(26.0);
-                    let n = self.selection.len();
-                    ui.label(RichText::new(format!("{n} selected")).family(fonts::bold()).color(text()));
-                    ui.add_space(8.0);
-                    for (label, d) in [
-                        ("Today", today),
-                        ("Tomorrow", today + chrono::Days::new(1)),
-                        ("Next week", next_monday(today)),
-                    ] {
-                        if ui.button(label).on_hover_text(format!("Due {}", d.format("%a %b %-d"))).clicked() {
-                            op = Some(BulkOp::Due(Some(d)));
-                        }
+                // Clear is placed first, on the right, so it always has room. The other
+                // buttons fill the space to its left and wrap onto more rows when narrow.
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("✖ Clear").color(subtle())).frame(false))
+                        .on_hover_text("Clear selection (Esc)")
+                        .clicked()
+                    {
+                        self.selection.clear();
                     }
-                    let pick = ui.button("📅 Pick date…");
-                    if let Some(picked) = date_menu(&pick, None, true, today) {
-                        op = Some(BulkOp::Due(picked));
-                    }
-                    ui.menu_button("Move to list", |ui| {
-                        if self.cfg.lists.is_empty() {
-                            ui.label(RichText::new("Create a list with + next to LISTS first.").color(subtle()));
-                        }
-                        let from = match &self.view {
-                            View::List(l) => Some(l.clone()),
-                            _ => None,
-                        };
-                        for name in &self.cfg.lists {
-                            if from.as_ref() != Some(name) && ui.button(name).clicked() {
-                                op = Some(BulkOp::MoveToList { to: name.clone(), from: from.clone() });
+                    ui.with_layout(Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
+                        ui.set_min_height(26.0);
+                        let n = self.selection.len();
+                        ui.label(RichText::new(format!("{n} selected")).family(fonts::bold()).color(text()));
+                        ui.add_space(8.0);
+                        for (label, d) in [
+                            ("Today", today),
+                            ("Tomorrow", today + chrono::Days::new(1)),
+                            ("Next week", next_monday(today)),
+                        ] {
+                            if ui.button(label).on_hover_text(format!("Due {}", d.format("%a %b %-d"))).clicked() {
+                                op = Some(BulkOp::Due(Some(d)));
                             }
                         }
-                    });
-                    if ui.button(RichText::new("✔ Complete").color(green())).clicked() {
-                        op = Some(BulkOp::Complete);
-                    }
-                    if ui.button(RichText::new("Delete…").color(red())).clicked() {
-                        op = Some(BulkOp::Delete);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(RichText::new("✖ Clear").color(subtle())).frame(false))
-                            .on_hover_text("Clear selection (Esc)")
-                            .clicked()
-                        {
-                            self.selection.clear();
+                        let pick = ui.button("📅 Pick date…");
+                        if let Some(picked) = date_menu(&pick, None, true, today) {
+                            op = Some(BulkOp::Due(picked));
+                        }
+                        ui.menu_button("Move to list", |ui| {
+                            if self.cfg.lists.is_empty() {
+                                ui.label(RichText::new("Create a list with + next to LISTS first.").color(subtle()));
+                            }
+                            let from = match &self.view {
+                                View::List(l) => Some(l.clone()),
+                                _ => None,
+                            };
+                            for name in &self.cfg.lists {
+                                if from.as_ref() != Some(name) && ui.button(name).clicked() {
+                                    op = Some(BulkOp::MoveToList { to: name.clone(), from: from.clone() });
+                                }
+                            }
+                        });
+                        if self.cfg.vaults.len() > 1 {
+                            ui.menu_button("Move to vault", |ui| {
+                                for v in &self.cfg.vaults {
+                                    if ui.button(vault_name(v)).clicked() {
+                                        op = Some(BulkOp::MoveToVault(v.clone()));
+                                    }
+                                }
+                            });
+                        }
+                        if ui.button(RichText::new("✔ Complete").color(green())).clicked() {
+                            op = Some(BulkOp::Complete);
+                        }
+                        if ui.button(RichText::new("Delete…").color(red())).clicked() {
+                            op = Some(BulkOp::Delete);
                         }
                     });
                 });
@@ -1044,6 +1087,23 @@ impl App {
         }
     }
 
+    /// Points the new task box at the vault last used in this view, if there is one.
+    fn recall_vault(&mut self) {
+        let Some(key) = vault_memory_key(&self.view) else { return };
+        if let Some(i) = self.cfg.vault_for.get(&key).and_then(|p| self.cfg.vaults.iter().position(|v| v == p)) {
+            self.draft.vault = i;
+        }
+    }
+
+    /// Remembers the new task box's vault for this view.
+    fn remember_vault(&mut self) {
+        let (Some(key), Some(root)) = (vault_memory_key(&self.view), self.cfg.vaults.get(self.draft.vault)) else { return };
+        if self.cfg.vault_for.get(&key) != Some(root) {
+            self.cfg.vault_for.insert(key, root.clone());
+            self.cfg.save();
+        }
+    }
+
     fn add_draft(&mut self) {
         let Some(root) = self.cfg.vaults.get(self.draft.vault).cloned() else {
             self.error = Some("Add a vault folder in Settings first.".into());
@@ -1071,6 +1131,7 @@ impl App {
         });
         match result {
             Ok(()) => {
+                self.remember_vault();
                 self.draft.reset(self.cfg.default_due_date(today));
                 self.error = None;
                 self.focus_new = true;
@@ -1261,6 +1322,10 @@ impl App {
             self.error = Some(e);
             return;
         }
+        if let Some(root) = self.cfg.vault_for.remove(&format!("list:{from}"))
+            && let Some(n) = &to {
+                self.cfg.vault_for.insert(format!("list:{n}"), root);
+            }
         let pos = self.cfg.lists.iter().position(|l| l == from);
         match (&to, pos) {
             (Some(n), Some(i)) if !self.cfg.lists.contains(n) => self.cfg.lists[i] = n.clone(),
@@ -1384,6 +1449,7 @@ impl App {
                             self.add_draft();
                         }
                         if self.cfg.vaults.len() > 1 && !matches!(self.view, View::Vault(_)) {
+                            let before = self.draft.vault;
                             egui::ComboBox::from_id_salt("new_vault")
                                 .width(80.0)
                                 .selected_text(vault_name(&self.cfg.vaults[self.draft.vault]))
@@ -1392,6 +1458,9 @@ impl App {
                                         ui.selectable_value(&mut self.draft.vault, i, vault_name(v));
                                     }
                                 });
+                            if self.draft.vault != before {
+                                self.remember_vault();
+                            }
                         }
                         // The due date chip opens the same date menu as a task's chip:
                         // quick picks, a calendar and "Remove due date".
@@ -1471,6 +1540,12 @@ impl App {
             }
         }
 
+        // Within each group, starred tasks come first, then the order set by dragging.
+        // Tasks never dragged keep the order above, after the dragged ones.
+        for (_, _, items) in &mut groups {
+            items.sort_by_key(|t| (!t.starred(today), self.meta.get(t).and_then(|m| m.rank).unwrap_or(i64::MAX)));
+        }
+
         // Remember the order rows are shown in, and drop selected tasks that are gone
         // (completed, filtered out…).
         self.order = groups.iter().flat_map(|(_, _, items)| items.iter().map(|t| task_key(t))).collect();
@@ -1483,9 +1558,11 @@ impl App {
         let show_file = !self.cfg.group_by_file;
         let group_by_file = self.cfg.group_by_file;
         let mut click = None;
+        let mut reorder: Option<Vec<TaskKey>> = None;
         let mut row = RowUi {
             meta: &self.meta,
             lists: &self.cfg.lists,
+            vaults: &self.cfg.vaults,
             title_edit: &mut self.title_edit,
             notes_edit: &mut self.notes_edit,
             expanded: &mut self.expanded,
@@ -1529,9 +1606,14 @@ impl App {
                 }
             }
             ui.add_space(20.0);
+            reorder = drop_between_rows(ui, &groups, row.row_rects);
         });
         if let Some(c) = click {
             self.apply_click(c);
+        }
+        if let Some(keys) = reorder {
+            let items = keys.iter().filter_map(|k| self.tasks.iter().find(|t| &task_key(t) == k).cloned()).collect();
+            action = Some(Action::Reorder(items));
         }
         action
     }
@@ -1705,50 +1787,17 @@ impl App {
             ui.add_space(20.0);
             section(ui, "Sound", "");
             ui.horizontal(|ui| {
-                ui.label("Completion chime");
-                let before = self.cfg.chime.clone();
-                egui::ComboBox::from_id_salt("chime")
-                    .width(140.0)
-                    .selected_text(self.cfg.chime.as_deref().unwrap_or("Off"))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.cfg.chime, None, "Off");
-                        let (mine, system) = list_sounds();
-                        if !mine.is_empty() {
-                            ui.separator();
-                            ui.label(RichText::new("Your sounds").size(11.0).color(subtle()));
-                            for s in mine {
-                                ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
-                            }
-                            ui.separator();
-                            ui.label(RichText::new("macOS").size(11.0).color(subtle()));
-                        }
-                        for s in system {
-                            ui.selectable_value(&mut self.cfg.chime, Some(s.clone()), s);
-                        }
-                    });
-                if self.cfg.chime != before {
-                    if let Some(s) = &self.cfg.chime {
-                        play_sound(s);
-                    }
-                    changed = true;
+                if ui.checkbox(&mut self.cfg.sounds, "Play sounds").changed() {
+                    self.cfg.save();
                 }
-                if let Some(s) = &self.cfg.chime
-                    && ui.button("▶ Play").clicked() {
-                        play_sound(s);
-                    }
+                if ui.small_button("▶ Bell").on_hover_text("Plays when you complete a task").clicked() {
+                    play(Sound::Bell);
+                }
+                if ui.small_button("▶ Ding").on_hover_text("Plays when you star a task").clicked() {
+                    play(Sound::Ding);
+                }
             });
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Add your own: drop .aiff, .wav, .mp3, .m4a or .caf files into ~/Library/Sounds.")
-                        .size(12.0)
-                        .color(subtle()),
-                );
-                if ui.small_button("Open folder").clicked()
-                    && let Some(dir) = user_sounds_dir() {
-                        let _ = std::fs::create_dir_all(&dir);
-                        let _ = std::process::Command::new("open").arg(dir).spawn();
-                    }
-            });
+            ui.label(RichText::new("A bell when you complete a task, a ding when you star one.").size(12.0).color(subtle()));
 
             ui.add_space(20.0);
             section(ui, "Display", "");
@@ -2047,6 +2096,7 @@ const ROW_CONTROLS_W: f32 = 170.0;
 struct RowUi<'a> {
     meta: &'a MetaStore,
     lists: &'a [String],
+    vaults: &'a [PathBuf],
     title_edit: &'a mut Option<TitleEdit>,
     notes_edit: &'a mut Option<NotesEdit>,
     expanded: &'a mut Option<TaskKey>,
@@ -2088,6 +2138,12 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
         if is_cursor && r.scroll_to_cursor {
             ui.scroll_to_rect(rect, None);
         }
+        // Right-clicking anywhere on the row opens the same menu as the task name.
+        bg.context_menu(|ui| {
+            if let Some(a) = task_menu(ui, t, &task_lists, r) {
+                action = Some(a);
+            }
+        });
         if bg.double_clicked() {
             // Double-clicking the row (anywhere but the name) opens or closes its notes and lists.
             toggle_expanded(r, &key);
@@ -2187,6 +2243,11 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
                         if l.clicked() {
                             out = Some(Action::Open(t.clone()));
                         }
+                        l.context_menu(|ui| {
+                            if let Some(a) = task_menu(ui, t, &task_lists, r) {
+                                out = Some(a);
+                            }
+                        });
                     }
                     for name in &task_lists {
                         if list_tag(ui, name) {
@@ -2260,6 +2321,43 @@ fn list_scroll(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// While tasks are dragged over their own group, draws a line where they'd land.
+/// On release there, returns the group's new order, top to bottom.
+fn drop_between_rows(
+    ui: &egui::Ui,
+    groups: &[(String, Color32, Vec<&Task>)],
+    rects: &HashMap<TaskKey, egui::Rect>,
+) -> Option<Vec<TaskKey>> {
+    let dragged = egui::DragAndDrop::payload::<DraggedTasks>(ui.ctx())?;
+    let pos = ui.ctx().pointer_latest_pos().filter(|p| ui.clip_rect().contains(*p))?;
+    for (_, _, items) in groups {
+        let keys: Vec<TaskKey> = items.iter().map(|t| task_key(t)).collect();
+        // Only within one group: moving to another date group would mean changing the due date.
+        if !dragged.0.iter().all(|k| keys.contains(k)) {
+            continue;
+        }
+        for (i, k) in keys.iter().enumerate() {
+            let Some(rect) = rects.get(k) else { continue };
+            if !(rect.x_range().contains(pos.x) && rect.y_range().contains(pos.y)) {
+                continue;
+            }
+            let above = pos.y < rect.center().y;
+            let y = if above { rect.top() } else { rect.bottom() };
+            ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, blue()));
+            if !ui.input(|i| i.pointer.any_released()) {
+                return None;
+            }
+            // Where the dragged tasks go among the ones that stay, keeping their own order.
+            let at = if above { i } else { i + 1 };
+            let at = keys[..at].iter().filter(|k| !dragged.0.contains(k)).count();
+            let (mut order, moving): (Vec<TaskKey>, Vec<TaskKey>) = keys.iter().cloned().partition(|k| !dragged.0.contains(k));
+            order.splice(at..at, moving);
+            return (order != keys).then_some(order);
+        }
+    }
+    None
+}
+
 /// What dragging a row carries: the whole selection if the row is selected, else just that task.
 fn drag_payload(key: &TaskKey, selection: &HashSet<TaskKey>) -> DraggedTasks {
     if selection.contains(key) {
@@ -2275,7 +2373,11 @@ fn drag_label(ctx: &egui::Context) {
     let Some(pos) = ctx.pointer_latest_pos() else { return };
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
     let n = dragged.0.len();
-    let text = if n == 1 { "1 task: drop on a list".to_string() } else { format!("{n} tasks: drop on a list") };
+    let text = if n == 1 {
+        "1 task: drop on a list, or between tasks to reorder".to_string()
+    } else {
+        format!("{n} tasks: drop on a list, or between tasks to reorder")
+    };
     egui::Area::new(egui::Id::unique("drag_label"))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos + vec2(14.0, 10.0))
@@ -2347,7 +2449,7 @@ fn notes_button(ui: &mut egui::Ui, has_notes: bool, open: bool) -> egui::Respons
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Right-click menu on a task title.
+/// Right-click menu on a task row.
 fn task_menu(ui: &mut egui::Ui, t: &Task, task_lists: &[String], r: &mut RowUi) -> Option<Action> {
     let mut out = None;
     let key = task_key(t);
@@ -2360,6 +2462,15 @@ fn task_menu(ui: &mut egui::Ui, t: &Task, task_lists: &[String], r: &mut RowUi) 
     }
     if ui.button("Open in Obsidian").clicked() {
         out = Some(Action::Open(t.clone()));
+    }
+    if r.vaults.len() > 1 {
+        ui.menu_button("Move to vault", |ui| {
+            for v in r.vaults.iter().filter(|v| **v != t.vault_root) {
+                if ui.button(vault_name(v)).on_hover_text(format!("Moves the task to {} in {}", tasks::INBOX_FILE, vault_name(v))).clicked() {
+                    out = Some(Action::Bulk(BulkOp::MoveToVault(v.clone()), vec![t.clone()]));
+                }
+            }
+        });
     }
     ui.separator();
     if ui.button(RichText::new("Delete task…").color(red())).clicked() {
@@ -2916,6 +3027,7 @@ impl eframe::App for App {
             self.cursor = None;
             self.anchor = None;
             self.shown_view = self.view.clone();
+            self.recall_vault();
         }
 
         egui::Panel::left("sidebar")
