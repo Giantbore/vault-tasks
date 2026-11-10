@@ -30,16 +30,21 @@ A small native macOS app that gathers every open task from your Obsidian vaults 
 - Double-click a task's row (anywhere but its name) to add additional notes.
 - Quickly change due dates from this app, with changes updating in your notes immediately.
 - Edit multiple tasks at once. Cmd-click to add or remove a task from the selection, Shift-click to select a range, Cmd-A to select everything shown, Esc to clear.
+- Right-click anywhere on a task for a menu to rename it, open it in Obsidian, add it to lists, move it or delete it.
+- Drag a task up or down to reorder it within its group, such as Today or Next 7 Days. Starred tasks always stay at the top of their group.
+- Move a task to another vault from the right-click menu. Its line moves to `Vault Tasks.md` in that vault, and its notes and lists go with it. This only shows when you use more than one vault.
+- A bell plays when you complete a task and a ding when you star one. You can turn them off in Settings.
 
 ### Adding Tasks
 - Type in the new task box and press Enter. Tasks go to `Vault Tasks.md` at the root of the chosen vault.
+- The vault you pick is remembered for each list, and for All and Starred, so a work list keeps adding to your work vault.
 - **Natural language dates:** a phrase at the start or end of the task sets the due date and is left out of the name. "Send report fri" becomes "Send report" due Friday. It understands today, tomorrow, weekday names, next week, next monday, in 3 days, in 2 weeks, nov 15 and 11/15.
 - **Quick capture:** press Ctrl+Option+Space anywhere on your Mac to open a small window, type a task and press Enter. It's added to `Vault Tasks.md`, the same note as tasks added in the app, in the vault you pick in Settings. The note and shortcut can be changed. It works even when the app is hidden or minimized.
 
 ### Notes and Lists
 - **Notes:** click the ≡ button on a task to add notes. Markdown works: bullets, checkboxes, **bold**, _italic_, `code`, headings and links.
 - **Lists:** make your own lists under Lists in the sidebar. Add tasks by dragging them onto a list, from a task's notes panel, by right-clicking a task, or with Move to list.
-- Notes and lists are saved in `.vault-tasks.json` at each vault's root, so they sync with your vault and don't clutter your notes. The first time a task gets notes or a list, the app adds an Obsidian block ID (`^vt-abc123`) to the end of its line so it can find the task again after edits.
+- Notes and lists are saved in `.vault-tasks.json` at each vault's root, so they sync with your vault and don't clutter your notes. The first time a task gets notes, a list or a new position from dragging, the app adds an Obsidian block ID (`^vt-abc123`) to the end of its line so it can find the task again after edits.
 
 ## Requirements
 - A Mac running macOS 11 or later (Apple Silicon or Intel).
