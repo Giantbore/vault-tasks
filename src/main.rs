@@ -265,6 +265,9 @@ enum BulkOp {
     MoveToList { to: String, from: Option<String> },
 }
 
+/// Drag-and-drop payload: the tasks being dragged onto a list in the sidebar.
+struct DraggedTasks(Vec<TaskKey>);
+
 /// A click on a task row that changes the selection.
 struct RowClick {
     key: TaskKey,
@@ -1075,6 +1078,7 @@ impl App {
         });
         ui.add_space(4.0);
         let mut rename: Option<(String, Option<String>)> = None;
+        let mut dropped: Option<(String, Vec<TaskKey>)> = None;
         for name in self.cfg.lists.clone() {
             if self.list_edit.as_ref().is_some_and(|e| e.from.as_deref() == Some(name.as_str())) {
                 if let Some(r) = self.list_name_field(ui) {
@@ -1087,6 +1091,13 @@ impl App {
             let resp = side_item(ui, Glyph::List, &name, count, 0, sel);
             if resp.clicked() {
                 self.view = View::List(name.clone());
+            }
+            // Drop target: outline the list while tasks are dragged over it.
+            if resp.dnd_hover_payload::<DraggedTasks>().is_some() {
+                ui.painter().rect_stroke(resp.rect, CornerRadius::same(6), Stroke::new(2.0, blue()), egui::StrokeKind::Inside);
+            }
+            if let Some(dragged) = resp.dnd_release_payload::<DraggedTasks>() {
+                dropped = Some((name.clone(), dragged.0.clone()));
             }
             resp.context_menu(|ui| {
                 if ui.button("Rename list…").clicked() {
@@ -1111,6 +1122,10 @@ impl App {
         }
         if let Some((from, to)) = rename {
             self.apply_list_rename(&from, to);
+        }
+        if let Some((list, keys)) = dropped {
+            let items: Vec<Task> = self.tasks.iter().filter(|t| keys.contains(&task_key(t))).cloned().collect();
+            self.run(Action::Bulk(BulkOp::MoveToList { to: list, from: None }, items));
         }
     }
 
@@ -1980,7 +1995,8 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
     // Registering this click area before the row's own widgets lets the checkbox, title
     // and buttons keep their clicks; clicks on empty space land here.
     if let Some(rect) = r.row_rects.get(&key).copied() {
-        let bg = ui.interact(rect, ui.scope_id().with(("row", &key)), Sense::click());
+        let bg = ui.interact(rect, ui.scope_id().with(("row", &key)), Sense::click_and_drag());
+        bg.dnd_set_drag_payload(drag_payload(&key, r.selection));
         let fill = if selected {
             Some(blue().gamma_multiply(0.16))
         } else if is_cursor {
@@ -2048,9 +2064,11 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
                 fmt.italics = t.in_progress;
                 job.append(&t.description, 0.0, fmt);
                 let resp = ui
-                    .add(egui::Label::new(job).sense(Sense::click()).wrap())
+                    .add(egui::Label::new(job).sense(Sense::click_and_drag()).wrap())
                     .on_hover_cursor(egui::CursorIcon::Text)
                     .on_hover_text("Click to rename. Right-click for more.");
+                // Dragging the title drags the task (or the whole selection) toward a list.
+                resp.dnd_set_drag_payload(drag_payload(&key, r.selection));
                 if resp.clicked() {
                     let m = ui.input(|i| i.modifiers);
                     if m.command || m.shift {
@@ -2139,6 +2157,35 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
             action = Some(a);
         }
     action
+}
+
+/// What dragging a row carries: the whole selection if the row is selected, else just that task.
+fn drag_payload(key: &TaskKey, selection: &HashSet<TaskKey>) -> DraggedTasks {
+    if selection.contains(key) {
+        DraggedTasks(selection.iter().cloned().collect())
+    } else {
+        DraggedTasks(vec![key.clone()])
+    }
+}
+
+/// While tasks are being dragged, a small label follows the pointer.
+fn drag_label(ctx: &egui::Context) {
+    let Some(dragged) = egui::DragAndDrop::payload::<DraggedTasks>(ctx) else { return };
+    let Some(pos) = ctx.pointer_latest_pos() else { return };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let n = dragged.0.len();
+    let text = if n == 1 { "1 task: drop on a list".to_string() } else { format!("{n} tasks: drop on a list") };
+    egui::Area::new(egui::Id::unique("drag_label"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + vec2(14.0, 10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            Frame::new()
+                .fill(toast_bg())
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(10, 5))
+                .show(ui, |ui| ui.label(RichText::new(text).size(12.5).color(Color32::WHITE)));
+        });
 }
 
 fn toggle_expanded(r: &mut RowUi, key: &TaskKey) {
@@ -2810,6 +2857,7 @@ impl eframe::App for App {
                     });
             }
         }
+        drag_label(ui.ctx());
         if undo {
             self.undo_last();
         }
