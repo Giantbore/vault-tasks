@@ -321,6 +321,8 @@ struct App {
     /// The task whose notes and lists panel is open.
     expanded: Option<TaskKey>,
     list_edit: Option<ListEdit>,
+    /// The view shown last frame, to notice when the user switches views.
+    shown_view: View,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -356,6 +358,7 @@ impl App {
             notes_edit: None,
             expanded: None,
             list_edit: None,
+            shown_view: View::All,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -2122,6 +2125,13 @@ impl eframe::App for App {
             self.applied_dark = Some(dark);
         }
         self.handle_menu(&ctx);
+        // Switching views (vault, list, Starred, Completed…) closes any open notes panel.
+        if self.view != self.shown_view {
+            self.expanded = None;
+            self.notes_edit = None;
+            self.title_edit = None;
+            self.shown_view = self.view.clone();
+        }
 
         egui::Panel::left("sidebar")
             .exact_size(230.0)
