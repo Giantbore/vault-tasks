@@ -8,6 +8,7 @@ chrono = "0.4.45"
 dirs = "7.0.0"
 eframe = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["datepicker"] }
+global-hotkey = "0.10.0"
 jiff = "0.2.39"
 muda = "0.21.2"
 percent-encoding = "2.3.2"

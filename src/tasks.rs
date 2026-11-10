@@ -353,13 +353,42 @@ pub fn add_task(
     scheduled: Option<NaiveDate>,
     block_id: Option<&str>,
 ) -> Result<(), String> {
+    add_task_in(vault_root, INBOX_FILE, text, due, scheduled, block_id)
+}
+
+/// Appends a new task to `note` (a path inside the vault, e.g. "Inbox.md" or
+/// "Notes/Inbox"). Creates the note, and any folders, if it doesn't exist.
+/// Re-reads the note right before writing, so edits made in Obsidian are kept.
+pub fn add_task_in(
+    vault_root: &Path,
+    note: &str,
+    text: &str,
+    due: Option<NaiveDate>,
+    scheduled: Option<NaiveDate>,
+    block_id: Option<&str>,
+) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("Task is empty".into());
     }
-    let path = vault_root.join(INBOX_FILE);
+    let note = note.trim().trim_start_matches('/');
+    if note.is_empty() || note.split('/').any(|p| p == "..") {
+        return Err("Pick a note name inside the vault".into());
+    }
+    let mut path = vault_root.join(note);
+    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        path.set_extension("md");
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     let mut content = fs::read_to_string(&path).unwrap_or_else(|_| {
-        "# Vault Tasks\n\nTasks created in the Vault Tasks app.\n\n".to_string()
+        if note == INBOX_FILE {
+            "# Vault Tasks\n\nTasks created in the Vault Tasks app.\n\n".to_string()
+        } else {
+            let title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            format!("# {title}\n\n")
+        }
     });
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
@@ -497,5 +526,17 @@ mod tests {
         let t = scan_vault(&dir, &[]).pop().unwrap();
         assert!(t.completed);
         assert_eq!(t.block_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn adds_to_named_note() {
+        let dir = std::env::temp_dir().join("vt-test4");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        add_task_in(&dir, "Inbox/Capture", "Buy milk", parse_date("2026-12-01"), None, None).unwrap();
+        let out = fs::read_to_string(dir.join("Inbox/Capture.md")).unwrap();
+        assert!(out.starts_with("# Capture\n\n- [ ] Buy milk ➕ "));
+        assert!(out.ends_with(" 📅 2026-12-01\n"));
+        assert!(add_task_in(&dir, "../outside", "x", None, None, None).is_err());
     }
 }

@@ -1,3 +1,4 @@
+mod capture;
 mod fonts;
 mod menu;
 mod meta;
@@ -122,6 +123,12 @@ struct Config {
     appearance: Appearance,
     /// Custom lists shown in the sidebar, in order. Membership is stored in each vault's .vault-tasks.json.
     lists: Vec<String>,
+    /// Quick-capture shortcut, e.g. "ctrl+option+space".
+    capture_shortcut: String,
+    /// Vault quick-capture tasks go to (None: the first vault).
+    capture_vault: Option<PathBuf>,
+    /// Note in that vault they're added to. Created if it doesn't exist.
+    capture_note: String,
 }
 
 impl Default for Config {
@@ -138,6 +145,9 @@ impl Default for Config {
             chime: Some("Glass".into()),
             appearance: Appearance::System,
             lists: Vec::new(),
+            capture_shortcut: capture::DEFAULT_SHORTCUT.into(),
+            capture_vault: None,
+            capture_note: "Inbox.md".into(),
         }
     }
 }
@@ -366,6 +376,26 @@ struct App {
     scroll_to_cursor: bool,
     /// Date shown in the action bar's date picker.
     bulk_date: NaiveDate,
+    hotkey: capture::Hotkey,
+    /// The quick-capture window, while it's open.
+    capture: Option<CaptureWindow>,
+    /// Shortcut being typed in Settings.
+    shortcut_buf: String,
+}
+
+/// State of the floating quick-capture window.
+struct CaptureWindow {
+    text: String,
+    /// Focus the window and its text field on the first frame.
+    first_frame: bool,
+    error: Option<String>,
+}
+
+/// What the user did in the quick-capture window this frame.
+enum CaptureOutcome {
+    Typing,
+    Cancel,
+    Save,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -379,6 +409,7 @@ impl App {
         cfg.text_size = cfg.text_size.min(fonts::SIZES.len() - 1);
         fonts::apply(&cc.egui_ctx, cfg.font);
         cc.egui_ctx.set_zoom_factor(fonts::SIZES[cfg.text_size].1);
+        let cfg_shortcut = cfg.capture_shortcut.clone();
         let mut app = App {
             view: if cfg.vaults.is_empty() { View::Settings } else { View::All },
             cfg,
@@ -409,6 +440,9 @@ impl App {
             row_rects: HashMap::new(),
             scroll_to_cursor: false,
             bulk_date: Local::now().date_naive(),
+            hotkey: capture::Hotkey::new(&cc.egui_ctx, &cfg_shortcut),
+            capture: None,
+            shortcut_buf: cfg_shortcut.clone(),
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -803,6 +837,118 @@ impl App {
         // `?` on an Option returns None from this function when nothing was clicked.
         let op = op?;
         Some(Action::Bulk(op, self.targets()))
+    }
+
+    /// The vault quick-capture adds to: the one chosen in Settings, else the first vault.
+    fn capture_root(&self) -> Option<PathBuf> {
+        self.cfg
+            .capture_vault
+            .clone()
+            .filter(|v| self.cfg.vaults.contains(v))
+            .or_else(|| self.cfg.vaults.first().cloned())
+    }
+
+    /// Draws the floating quick-capture window (a second native window) while it's open.
+    fn capture_window(&mut self, ctx: &egui::Context) {
+        if self.hotkey.pressed() {
+            self.capture = Some(CaptureWindow { text: String::new(), first_frame: true, error: None });
+        }
+        if self.capture.is_none() {
+            return;
+        }
+        let today = Local::now().date_naive();
+        // Read what's needed from `self` first: once `cap` borrows `self.capture` mutably
+        // below, the rest of `self` can't be borrowed until the closure is done with it.
+        let default_due = self.cfg.default_due_date(today);
+        let target = self.capture_root().map(|v| format!("{} / {}", vault_name(&v), self.cfg.capture_note.trim()));
+        let Some(cap) = &mut self.capture else { return };
+        let id = egui::ViewportId::from_hash_of("quick_capture");
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Quick Capture")
+            .with_inner_size([560.0, 96.0])
+            .with_resizable(false)
+            .with_always_on_top()
+            .with_active(true);
+        let first = std::mem::take(&mut cap.first_frame);
+        if first {
+            // Bring the app and this window to the front so typing goes straight in.
+            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+        }
+        // An "immediate" viewport is drawn right now, inside this frame, by the closure below.
+        let outcome = ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            let mut outcome = CaptureOutcome::Typing;
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(main_bg()).inner_margin(Margin::symmetric(16, 12)))
+                .show(ui, |ui| {
+                    let parsed = natural_date::parse(&cap.text, today);
+                    ui.horizontal(|ui| {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut cap.text)
+                                .hint_text("New task, e.g. \"Call the dentist tomorrow\"")
+                                .font(FontId::proportional(16.0))
+                                .desired_width(ui.available_width() - 110.0),
+                        );
+                        if first || !resp.has_focus() && cap.error.is_none() {
+                            resp.request_focus();
+                        }
+                        let due = parsed.due.or(default_due);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match due {
+                            Some(d) => {
+                                date_chip(ui, d, today);
+                            }
+                            None => {
+                                ui.label(RichText::new("No date").size(12.0).color(subtle()));
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    let hint = match (&cap.error, &target) {
+                        (Some(e), _) => RichText::new(format!("⚠ {e}")).color(red()),
+                        (None, Some(t)) => RichText::new(format!("Enter adds to {t}  ·  Esc cancels")).color(subtle()),
+                        (None, None) => RichText::new("Add a vault in Settings first.").color(red()),
+                    };
+                    ui.label(hint.size(12.0));
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        outcome = CaptureOutcome::Cancel;
+                    } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !cap.text.trim().is_empty() {
+                        outcome = CaptureOutcome::Save;
+                    }
+                });
+            if ui.input(|i| i.viewport().close_requested()) {
+                outcome = CaptureOutcome::Cancel;
+            }
+            outcome
+        });
+        match outcome {
+            CaptureOutcome::Typing => {}
+            CaptureOutcome::Cancel => self.capture = None,
+            CaptureOutcome::Save => {
+                let text = self.capture.as_ref().map(|c| c.text.clone()).unwrap_or_default();
+                let parsed = natural_date::parse(&text, today);
+                let result = match self.capture_root() {
+                    Some(root) => tasks::add_task_in(
+                        &root,
+                        &self.cfg.capture_note,
+                        &parsed.title,
+                        parsed.due.or(default_due),
+                        None,
+                        None,
+                    ),
+                    None => Err("Add a vault folder in Settings first.".into()),
+                };
+                match result {
+                    Ok(()) => {
+                        self.capture = None;
+                        self.rescan();
+                    }
+                    Err(e) => {
+                        if let Some(c) = &mut self.capture {
+                            c.error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn add_draft(&mut self) {
@@ -1419,6 +1565,51 @@ impl App {
                 }
                 changed = true;
             }
+
+            ui.add_space(20.0);
+            section(
+                ui,
+                "Quick capture",
+                "Press the shortcut anywhere on your Mac to add a task without opening the app. Dates like \"tomorrow\" or \"fri\" work here too.",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Shortcut");
+                let resp = ui.add(egui::TextEdit::singleline(&mut self.shortcut_buf).desired_width(180.0));
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let differs = self.shortcut_buf.trim() != self.cfg.capture_shortcut;
+                if (ui.add_enabled(differs, egui::Button::new("Apply")).clicked() || (enter && differs))
+                    && self.hotkey.set(self.shortcut_buf.trim()).is_ok()
+                {
+                    self.cfg.capture_shortcut = self.shortcut_buf.trim().to_string();
+                    changed = true;
+                }
+                ui.label(RichText::new(capture::pretty(&self.cfg.capture_shortcut)).color(subtle()));
+            });
+            ui.label(
+                RichText::new("Write it like ctrl+option+space or cmd+shift+k. macOS doesn't need any extra permission for this.")
+                    .size(12.0)
+                    .color(subtle()),
+            );
+            if let Some(e) = &self.hotkey.error {
+                ui.label(RichText::new(format!("⚠ {e}")).color(red()));
+            }
+            ui.horizontal(|ui| {
+                ui.label("Add tasks to");
+                let current = self.capture_root();
+                let label = current.as_deref().map(vault_name).unwrap_or_else(|| "No vault".into());
+                egui::ComboBox::from_id_salt("capture_vault").width(140.0).selected_text(label).show_ui(ui, |ui| {
+                    for v in &self.cfg.vaults {
+                        if ui.selectable_label(current.as_ref() == Some(v), vault_name(v)).clicked() {
+                            self.cfg.capture_vault = Some(v.clone());
+                            changed = true;
+                        }
+                    }
+                });
+                ui.label("/");
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut self.cfg.capture_note).hint_text("Inbox.md").desired_width(180.0))
+                    .lost_focus();
+            });
 
             ui.add_space(20.0);
             section(ui, "Sound", "");
@@ -2525,6 +2716,7 @@ impl eframe::App for App {
             self.applied_dark = Some(dark);
         }
         self.handle_menu(&ctx);
+        self.capture_window(&ctx);
         // Switching views (vault, list, Starred, Completed…) closes any open notes panel.
         if self.view != self.shown_view {
             self.expanded = None;
