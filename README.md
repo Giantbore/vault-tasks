@@ -13,7 +13,11 @@ A small native macOS app that collects every open task from your Obsidian vaults
 - Check a task off to mark it done in its note (`[x]` and `✅ date`), with an optional completion chime and an Undo bar.
 - **Completed** view lists tasks done today, in the past 7 days or past 30 days, grouped by day. Uncheck one to reopen it.
 - Click a date chip (or the 📅 button on undated tasks) to set, change or remove a due date. Quick picks plus a calendar; the `📅` date is written to the note.
-- Click a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled in a vault, the note opens at the task's line.
+- Click a task's name to rename it in place (dates, priority and other metadata are kept). Long names wrap.
+- Click the grey vault · file line under a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled in a vault, the note opens at the task's line.
+- **Notes**: click the ≡ button on a task to add Markdown notes (bullets, bold, italic, code, headings, links).
+- **Lists**: create custom lists under LISTS in the sidebar (right-click a list to rename or delete it). Add tasks from a task's notes panel or by right-clicking its name. New tasks made inside a list view join that list.
+- Notes and lists are stored in `.vault-tasks.json` at each vault's root, so they sync with the vault and don't clutter your notes. A task gets an Obsidian block ID (`^vt-abc123`) at the end of its line the first time you give it notes or a list, so the app can find it again after edits.
 - Create tasks from the app. They are added to `Vault Tasks.md` at the root of the chosen vault.
 - Light and dark themes (or match macOS), with a matching logo and Dock icon.
 - Settings for vault folders, excluded folders, default due date, chime sound, appearance, font and text size.

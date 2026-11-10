@@ -1,5 +1,6 @@
 mod fonts;
 mod menu;
+mod meta;
 mod tasks;
 mod theme;
 
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use fonts::BodyFont;
 use menu::Cmd;
+use meta::{MetaStore, TaskMeta};
 use tasks::{Priority, Task};
 use theme::*;
 
@@ -128,6 +130,8 @@ struct Config {
     /// Sound played when a task is completed; None = off.
     chime: Option<String>,
     appearance: Appearance,
+    /// Custom lists shown in the sidebar, in order. Membership is stored in each vault's .vault-tasks.json.
+    lists: Vec<String>,
 }
 
 impl Default for Config {
@@ -143,6 +147,7 @@ impl Default for Config {
             default_due_days: 3,
             chime: Some("Glass".into()),
             appearance: Appearance::System,
+            lists: Vec::new(),
         }
     }
 }
@@ -206,6 +211,7 @@ enum View {
     Today,
     Completed,
     Vault(String),
+    List(String),
     Settings,
 }
 
@@ -244,6 +250,37 @@ enum Action {
     Star(Task, bool),
     SetDue(Task, Option<NaiveDate>),
     Open(Task),
+    Rename(Task, String),
+    SaveNotes(Task, String),
+    ToggleList(Task, String, bool),
+}
+
+/// Identifies a task row across frames: (file, line).
+type TaskKey = (PathBuf, usize);
+
+fn task_key(t: &Task) -> TaskKey {
+    (t.file.clone(), t.line)
+}
+
+/// A task title being renamed in place.
+struct TitleEdit {
+    key: TaskKey,
+    buf: String,
+    focus: bool,
+}
+
+/// Notes being edited for the expanded task.
+struct NotesEdit {
+    key: TaskKey,
+    buf: String,
+    focus: bool,
+}
+
+/// A list name being typed in the sidebar: a new list (`from` = None) or a rename.
+struct ListEdit {
+    from: Option<String>,
+    buf: String,
+    focus: bool,
 }
 
 /// The last task checked off, for the Undo bar.
@@ -279,6 +316,12 @@ struct App {
     applied_dark: Option<bool>,
     /// When the user last refreshed by hand (drives the refresh button animation).
     refreshed_at: Option<Instant>,
+    meta: MetaStore,
+    title_edit: Option<TitleEdit>,
+    notes_edit: Option<NotesEdit>,
+    /// The task whose notes and lists panel is open.
+    expanded: Option<TaskKey>,
+    list_edit: Option<ListEdit>,
 }
 
 fn vault_name(p: &std::path::Path) -> String {
@@ -309,6 +352,11 @@ impl App {
             _logos: load_logos(&cc.egui_ctx),
             applied_dark: None,
             refreshed_at: None,
+            meta: MetaStore::default(),
+            title_edit: None,
+            notes_edit: None,
+            expanded: None,
+            list_edit: None,
         };
         app.draft.due = app.cfg.default_due_date(Local::now().date_naive());
         app.rescan();
@@ -360,6 +408,18 @@ impl App {
                 .cmp(&(b.due.is_none(), b.due, b.priority, &b.file, b.line))
         });
         self.tasks = all;
+        self.meta = MetaStore::load(&self.cfg.vaults);
+        // Lists used on another Mac (synced through the vault) show up here too.
+        let mut added = false;
+        for name in self.meta.list_names() {
+            if !self.cfg.lists.contains(&name) {
+                self.cfg.lists.push(name);
+                added = true;
+            }
+        }
+        if added {
+            self.cfg.save();
+        }
         self.last_scan = Instant::now();
         self.scan_ms = start.elapsed().as_millis();
     }
@@ -378,6 +438,7 @@ impl App {
         q.is_empty()
             || t.description.to_lowercase().contains(&q)
             || t.rel_path().to_lowercase().contains(&q)
+            || self.meta.get(t).is_some_and(|m| m.notes.to_lowercase().contains(&q))
     }
 
     fn tasks_for(&self, view: &View, today: NaiveDate) -> Vec<&Task> {
@@ -391,6 +452,7 @@ impl App {
                 View::All | View::Settings | View::Completed => true,
                 View::Today => t.starred(today),
                 View::Vault(v) => &t.vault == v,
+                View::List(l) => self.meta.in_list(t, l),
             })
             .collect()
     }
@@ -448,6 +510,24 @@ impl App {
                 open_in_obsidian(t);
                 Ok(())
             }
+            Action::Rename(t, text) => tasks::rename_task(t, text),
+            Action::SaveNotes(t, notes) => {
+                if notes.trim().is_empty() && self.meta.get(t).is_none() {
+                    Ok(())
+                } else {
+                    tasks::ensure_block_id(t).and_then(|id| {
+                        self.meta.update(&t.vault_root, &id, |m| m.notes = notes.trim_end().to_string())
+                    })
+                }
+            }
+            Action::ToggleList(t, list, on) => tasks::ensure_block_id(t).and_then(|id| {
+                self.meta.update(&t.vault_root, &id, |m| {
+                    m.lists.retain(|l| l != list);
+                    if *on {
+                        m.lists.push(list.clone());
+                    }
+                })
+            }),
         };
         match result {
             Ok(()) => {
@@ -467,7 +547,18 @@ impl App {
         };
         let today = Local::now().date_naive();
         let sched = (self.view == View::Today).then_some(today);
-        match tasks::add_task(&root, &self.draft.text, self.draft.due, sched) {
+        let list = match &self.view {
+            View::List(l) => Some(l.clone()),
+            _ => None,
+        };
+        let id = list.as_ref().map(|_| tasks::new_block_id());
+        let result = tasks::add_task(&root, &self.draft.text, self.draft.due, sched, id.as_deref()).and_then(|()| {
+            match (&id, &list) {
+                (Some(id), Some(l)) => self.meta.update(&root, id, |m| m.lists.push(l.clone())),
+                _ => Ok(()),
+            }
+        });
+        match result {
             Ok(()) => {
                 self.draft.text.clear();
                 self.draft.due = self.cfg.default_due_date(today);
@@ -528,6 +619,8 @@ impl App {
             }
         }
 
+        self.sidebar_lists(ui, today);
+
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(8.0);
             let row = vec2(ui.available_width(), 28.0);
@@ -548,6 +641,122 @@ impl App {
         });
     }
 
+    fn sidebar_lists(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("LISTS").size(11.0).color(subtle()).family(fonts::bold()));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(RichText::new("+").size(15.0).color(subtle())).frame(false))
+                    .on_hover_text("New list")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.list_edit = Some(ListEdit { from: None, buf: String::new(), focus: true });
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let mut rename: Option<(String, Option<String>)> = None;
+        for name in self.cfg.lists.clone() {
+            if self.list_edit.as_ref().is_some_and(|e| e.from.as_deref() == Some(name.as_str())) {
+                if let Some(r) = self.list_name_field(ui) {
+                    rename = Some(r);
+                }
+                continue;
+            }
+            let count = self.tasks_for(&View::List(name.clone()), today).len();
+            let sel = self.view == View::List(name.clone());
+            let resp = side_item(ui, Glyph::List, &name, count, 0, sel);
+            if resp.clicked() {
+                self.view = View::List(name.clone());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Rename list…").clicked() {
+                    self.list_edit = Some(ListEdit { from: Some(name.clone()), buf: name.clone(), focus: true });
+                }
+                if ui.button(RichText::new("Delete list").color(red())).on_hover_text("Tasks stay in your notes").clicked() {
+                    rename = Some((name.clone(), None));
+                }
+            });
+        }
+        if self.list_edit.as_ref().is_some_and(|e| e.from.is_none()) {
+            if let Some(r) = self.list_name_field(ui) {
+                rename = Some(r);
+            }
+        }
+        if self.cfg.lists.is_empty() && self.list_edit.is_none() {
+            let r = ui.add(
+                egui::Label::new(RichText::new("+ New list").size(13.0).color(faint())).sense(Sense::click()),
+            );
+            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.list_edit = Some(ListEdit { from: None, buf: String::new(), focus: true });
+            }
+        }
+        if let Some((from, to)) = rename {
+            self.apply_list_rename(&from, to);
+        }
+    }
+
+    /// Text field for a new or renamed list. Returns (old name, new name) when a rename
+    /// is confirmed; creates new lists itself.
+    fn list_name_field(&mut self, ui: &mut egui::Ui) -> Option<(String, Option<String>)> {
+        let e = self.list_edit.as_mut()?;
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut e.buf)
+                .hint_text("List name")
+                .desired_width(f32::INFINITY)
+                .margin(Margin::symmetric(8, 5)),
+        );
+        if e.focus {
+            resp.request_focus();
+            e.focus = false;
+        }
+        if !resp.lost_focus() {
+            return None;
+        }
+        let e = self.list_edit.take()?;
+        let name = e.buf.trim().to_string();
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) || name.is_empty() {
+            return None;
+        }
+        match e.from {
+            None => {
+                if !self.cfg.lists.contains(&name) {
+                    self.cfg.lists.push(name.clone());
+                    self.cfg.save();
+                }
+                self.view = View::List(name);
+                None
+            }
+            Some(from) if from != name => Some((from, Some(name))),
+            Some(_) => None,
+        }
+    }
+
+    /// Renames a list, or deletes it when `to` is None. Tasks themselves are not touched.
+    fn apply_list_rename(&mut self, from: &str, to: Option<String>) {
+        if let Err(e) = self.meta.rename_list(from, to.as_deref()) {
+            self.error = Some(e);
+            return;
+        }
+        let pos = self.cfg.lists.iter().position(|l| l == from);
+        match (&to, pos) {
+            (Some(n), Some(i)) if !self.cfg.lists.contains(n) => self.cfg.lists[i] = n.clone(),
+            (_, Some(i)) => {
+                self.cfg.lists.remove(i);
+            }
+            _ => {}
+        }
+        self.cfg.save();
+        if self.view == View::List(from.to_string()) {
+            self.view = match to {
+                Some(n) => View::List(n),
+                None => View::All,
+            };
+        }
+    }
+
     // ---------- Main list ----------
 
     fn header(&mut self, ui: &mut egui::Ui, today: NaiveDate) {
@@ -556,6 +765,7 @@ impl App {
             View::Today => (Glyph::Text("★", star()), "Starred".to_string(), Some(today.format("%A, %B %-d").to_string())),
             View::Completed => (Glyph::Done, "Completed".to_string(), None),
             View::Vault(v) => (Glyph::Text("◈", subtle()), v.clone(), None),
+            View::List(l) => (Glyph::List, l.clone(), None),
             View::Settings => (Glyph::Text("⚙", subtle()), "Settings".to_string(), None),
         };
         ui.horizontal(|ui| {
@@ -594,10 +804,14 @@ impl App {
                     let stroke = Stroke::new(1.6, blue());
                     ui.painter().line_segment([c - vec2(5.5, 0.0), c + vec2(5.5, 0.0)], stroke);
                     ui.painter().line_segment([c - vec2(0.0, 5.5), c + vec2(0.0, 5.5)], stroke);
-                    let hint = if self.view == View::Today { "New starred task" } else { "New task" };
+                    let hint = match &self.view {
+                        View::Today => "New starred task".to_string(),
+                        View::List(l) => format!("New task in {l}"),
+                        _ => "New task".to_string(),
+                    };
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.draft.text)
-                            .hint_text(hint)
+                            .hint_text(hint.as_str())
                             .frame(Frame::NONE)
                             .font(egui::TextStyle::Body)
                             .align(Align2::LEFT_CENTER)
@@ -656,16 +870,18 @@ impl App {
 
     fn task_list(&mut self, ui: &mut egui::Ui, today: NaiveDate) -> Option<Action> {
         let view = self.view.clone();
-        let visible = self.tasks_for(&view, today);
+        // Cloned so rows can borrow the edit state mutably.
+        let visible: Vec<Task> = self.tasks_for(&view, today).into_iter().cloned().collect();
+        let visible: Vec<&Task> = visible.iter().collect();
         let mut action = None;
 
         if visible.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                let msg = if view == View::Today {
-                    "Nothing starred. Click ☆ on any task to add it here."
-                } else {
-                    "No open tasks 🎉"
+                let msg = match view {
+                    View::Today => "Nothing starred. Click ☆ on any task to add it here.",
+                    View::List(_) => "No tasks in this list yet. Add one above, or right-click any task to add it here.",
+                    _ => "No open tasks 🎉",
                 };
                 ui.label(RichText::new(msg).size(14.0).color(subtle()));
             });
@@ -696,6 +912,13 @@ impl App {
         }
 
         let show_file = !self.cfg.group_by_file;
+        let mut row = RowUi {
+            meta: &self.meta,
+            lists: &self.cfg.lists,
+            title_edit: &mut self.title_edit,
+            notes_edit: &mut self.notes_edit,
+            expanded: &mut self.expanded,
+        };
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (name, color, items) in &groups {
                 if !name.is_empty() {
@@ -706,7 +929,7 @@ impl App {
                     ui.add_space(8.0);
                 }
                 for t in items {
-                    if let Some(a) = task_row(ui, t, today, show_file) {
+                    if let Some(a) = task_row(ui, t, today, show_file, &mut row) {
                         action = Some(a);
                     }
                 }
@@ -1000,6 +1223,8 @@ enum Glyph<'a> {
     Missing,
     /// Amber circle with a white dot.
     Partial,
+    /// Bulleted list icon (custom lists).
+    List,
 }
 
 static LOGO_DARK: std::sync::OnceLock<egui::TextureId> = std::sync::OnceLock::new();
@@ -1065,6 +1290,15 @@ fn paint_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, g: Glyph) {
             let r = size * 0.5;
             p.circle_filled(c, r, amber());
             p.circle_filled(c, r * 0.3, Color32::WHITE);
+        }
+        Glyph::List => {
+            let s = size / 16.0;
+            let color = blue();
+            for i in -1..=1 {
+                let y = c.y + i as f32 * 4.5 * s;
+                p.circle_filled(egui::pos2(c.x - 5.5 * s, y), 1.4 * s, color);
+                p.line_segment([egui::pos2(c.x - 2.5 * s, y), egui::pos2(c.x + 6.5 * s, y)], Stroke::new(1.6 * s, color));
+            }
         }
     }
 }
@@ -1169,11 +1403,27 @@ fn side_item(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> Option<Action> {
+/// Width kept free on the right of a task row for the notes button, date chip and star.
+const ROW_CONTROLS_W: f32 = 170.0;
+
+/// Edit state and app data the task rows need.
+struct RowUi<'a> {
+    meta: &'a MetaStore,
+    lists: &'a [String],
+    title_edit: &'a mut Option<TitleEdit>,
+    notes_edit: &'a mut Option<NotesEdit>,
+    expanded: &'a mut Option<TaskKey>,
+}
+
+fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &mut RowUi) -> Option<Action> {
     let mut action = None;
     let starred = t.starred(today);
-    ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
+    let key = task_key(t);
+    let meta = r.meta.get(t);
+    let has_notes = meta.is_some_and(|m| !m.notes.trim().is_empty());
+    let task_lists: Vec<String> = meta.map(|m| m.lists.clone()).unwrap_or_default();
+    ui.add_space(3.0);
+    ui.horizontal_top(|ui| {
         let mut checked = false;
         let cb = ui.checkbox(&mut checked, "");
         if t.recurrence.is_some() {
@@ -1184,35 +1434,91 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
             action = Some(Action::Complete(t.clone()));
         }
 
-        ui.vertical(|ui| {
+        let text_w = (ui.available_width() - ROW_CONTROLS_W).max(120.0);
+        ui.allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(text_w);
             ui.spacing_mut().item_spacing.y = 1.0;
-            ui.horizontal(|ui| {
+            ui.add_space(1.0);
+            let editing = r.title_edit.as_ref().is_some_and(|e| e.key == key);
+            if editing {
+                let e = r.title_edit.as_mut().unwrap();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut e.buf)
+                        .font(FontId::proportional(14.5))
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(4, 2)),
+                );
+                if e.focus {
+                    resp.request_focus();
+                    e.focus = false;
+                }
+                if resp.lost_focus() {
+                    let text = e.buf.trim().to_string();
+                    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    if !cancelled && !text.is_empty() && text != t.description {
+                        action = Some(Action::Rename(t.clone(), text));
+                    }
+                    *r.title_edit = None;
+                }
+            } else {
+                let mut job = egui::text::LayoutJob::default();
                 if t.priority != Priority::Normal {
-                    ui.label(RichText::new(t.priority.icon()).size(12.0));
+                    job.append(&format!("{} ", t.priority.icon()), 0.0, text_format(12.0, text(), false));
                 }
-                let mut title = RichText::new(&t.description).size(14.5).color(text());
-                if t.in_progress {
-                    title = title.italics();
-                }
+                let mut fmt = text_format(14.5, text(), false);
+                fmt.italics = t.in_progress;
+                job.append(&t.description, 0.0, fmt);
                 let resp = ui
-                    .add(egui::Label::new(title).sense(Sense::click()).truncate())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(format!("Open in Obsidian\n{} / {} (line {})", t.vault, t.rel_path(), t.line + 1));
+                    .add(egui::Label::new(job).sense(Sense::click()).wrap())
+                    .on_hover_cursor(egui::CursorIcon::Text)
+                    .on_hover_text("Click to rename. Right-click for more.");
                 if resp.clicked() {
-                    action = Some(Action::Open(t.clone()));
+                    *r.title_edit = Some(TitleEdit { key: key.clone(), buf: t.description.clone(), focus: true });
                 }
-            });
+                resp.context_menu(|ui| {
+                    if let Some(a) = task_menu(ui, t, &task_lists, r) {
+                        action = Some(a);
+                    }
+                });
+            }
+
+            let mut parts: Vec<String> = Vec::new();
             if show_file {
-                let file = t.file.file_stem().unwrap_or_default().to_string_lossy();
-                let mut sub = format!("{} · {}", t.vault, file);
-                if let Some(r) = &t.recurrence {
-                    sub.push_str(&format!("  ·  🔁 {r}"));
+                parts.push(format!("{} · {}", t.vault, t.file.file_stem().unwrap_or_default().to_string_lossy()));
+            }
+            if let Some(rec) = &t.recurrence {
+                parts.push(format!("🔁 {rec}"));
+            }
+            if !parts.is_empty() || !task_lists.is_empty() {
+                let resp = ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let mut out = None;
+                    if !parts.is_empty() {
+                        let l = ui
+                            .add(egui::Label::new(RichText::new(parts.join("  ·  ")).size(11.5).color(subtle())).sense(Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("Open in Obsidian\n{} / {} (line {})", t.vault, t.rel_path(), t.line + 1));
+                        if l.hovered() {
+                            let y = l.rect.bottom() - 1.0;
+                            ui.painter().hline(l.rect.x_range(), y, Stroke::new(1.0, subtle()));
+                        }
+                        if l.clicked() {
+                            out = Some(Action::Open(t.clone()));
+                        }
+                    }
+                    for name in &task_lists {
+                        list_tag(ui, name);
+                    }
+                    out
+                });
+                if let Some(a) = resp.inner {
+                    action = Some(a);
                 }
-                ui.label(RichText::new(sub).size(11.5).color(subtle()));
             }
         });
 
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            ui.add_space(8.0);
             let (icon, color, tip) = if starred {
                 ("★", star(), "Remove from Starred")
             } else {
@@ -1234,9 +1540,333 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool) -> O
             if let Some(a) = due_menu(&resp, t, today) {
                 action = Some(a);
             }
+            let open = r.expanded.as_ref() == Some(&key);
+            if notes_button(ui, has_notes, open).clicked() {
+                toggle_expanded(r, &key);
+            }
         });
     });
+    ui.add_space(3.0);
+
+    if r.expanded.as_ref() == Some(&key) {
+        if let Some(a) = details_panel(ui, t, meta, &task_lists, r) {
+            action = Some(a);
+        }
+    }
     action
+}
+
+fn toggle_expanded(r: &mut RowUi, key: &TaskKey) {
+    if r.expanded.as_ref() == Some(key) {
+        *r.expanded = None;
+    } else {
+        *r.expanded = Some(key.clone());
+    }
+    *r.notes_edit = None;
+}
+
+fn text_format(size: f32, color: Color32, bold: bool) -> egui::text::TextFormat {
+    let family = if bold { fonts::bold() } else { egui::FontFamily::Proportional };
+    egui::text::TextFormat { font_id: FontId::new(size, family), color, ..Default::default() }
+}
+
+/// Small tag showing a list the task belongs to.
+fn list_tag(ui: &mut egui::Ui, name: &str) {
+    let galley = ui.painter().layout_no_wrap(name.to_string(), FontId::proportional(11.0), blue());
+    let size = galley.size() + vec2(16.0, 2.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(4), blue().gamma_multiply(0.12));
+    let dot = egui::pos2(rect.left() + 6.0, rect.center().y);
+    ui.painter().circle_filled(dot, 1.8, blue());
+    ui.painter().galley(egui::pos2(rect.left() + 11.0, rect.center().y - galley.size().y / 2.0), galley, blue());
+}
+
+/// Painted notes icon: lines of text, blue when the task has notes.
+fn notes_button(ui: &mut egui::Ui, has_notes: bool, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() || open {
+        p.rect_filled(rect, CornerRadius::same(5), hover());
+    }
+    let color = if has_notes { blue() } else if resp.hovered() || open { subtle() } else { faint() };
+    let c = rect.center();
+    for (i, w) in [9.0f32, 9.0, 5.5].iter().enumerate() {
+        let y = c.y - 4.0 + i as f32 * 4.0;
+        p.line_segment([egui::pos2(c.x - 4.5, y), egui::pos2(c.x - 4.5 + w, y)], Stroke::new(1.5, color));
+    }
+    let tip = if has_notes { "Show notes and lists" } else { "Add notes or lists" };
+    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Right-click menu on a task title.
+fn task_menu(ui: &mut egui::Ui, t: &Task, task_lists: &[String], r: &mut RowUi) -> Option<Action> {
+    let mut out = None;
+    let key = task_key(t);
+    if ui.button("Rename").clicked() {
+        *r.title_edit = Some(TitleEdit { key: key.clone(), buf: t.description.clone(), focus: true });
+    }
+    if ui.button("Notes and lists").clicked() {
+        *r.expanded = Some(key);
+        *r.notes_edit = None;
+    }
+    if ui.button("Open in Obsidian").clicked() {
+        out = Some(Action::Open(t.clone()));
+    }
+    if !r.lists.is_empty() {
+        ui.separator();
+        ui.label(RichText::new("Lists").size(11.5).color(subtle()));
+        if let Some(a) = list_toggles(ui, t, task_lists, r.lists) {
+            out = Some(a);
+        }
+    }
+    out
+}
+
+/// One checkbox per list. Returns the toggle the user clicked.
+fn list_toggles(ui: &mut egui::Ui, t: &Task, task_lists: &[String], lists: &[String]) -> Option<Action> {
+    let mut out = None;
+    for name in lists {
+        let mut on = task_lists.contains(name);
+        if ui.checkbox(&mut on, name).changed() {
+            out = Some(Action::ToggleList(t.clone(), name.clone(), on));
+        }
+    }
+    out
+}
+
+/// Notes and lists for the expanded task, shown under its row.
+fn details_panel(ui: &mut egui::Ui, t: &Task, meta: Option<&TaskMeta>, task_lists: &[String], r: &mut RowUi) -> Option<Action> {
+    let mut out = None;
+    let key = task_key(t);
+    let notes = meta.map(|m| m.notes.as_str()).unwrap_or("");
+    ui.horizontal(|ui| {
+        ui.add_space(28.0);
+        Frame::new()
+            .fill(field_bg())
+            .stroke(Stroke::new(1.0, field_stroke()))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| ui.vertical(|ui| {
+                ui.set_width(ui.available_width() - 4.0);
+                ui.label(RichText::new("Notes").size(11.5).family(fonts::bold()).color(subtle()));
+                ui.add_space(2.0);
+                let editing = r.notes_edit.as_ref().is_some_and(|e| e.key == key);
+                if editing {
+                    let e = r.notes_edit.as_mut().unwrap();
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut e.buf)
+                            .hint_text("Markdown works: - bullets, **bold**, *italic*, `code`, # headings")
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(4)
+                            .font(FontId::proportional(13.5)),
+                    );
+                    if e.focus {
+                        resp.request_focus();
+                        e.focus = false;
+                    }
+                    ui.label(RichText::new("Saves when you click away. Esc cancels.").size(11.0).color(faint()));
+                    if resp.lost_focus() {
+                        let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        if !cancelled && e.buf.trim_end() != notes {
+                            out = Some(Action::SaveNotes(t.clone(), e.buf.clone()));
+                        }
+                        *r.notes_edit = None;
+                    }
+                } else {
+                    let start_edit = if notes.trim().is_empty() {
+                        ui.add(egui::Label::new(RichText::new("Add notes…").size(13.5).color(faint())).sense(Sense::click()))
+                            .on_hover_cursor(egui::CursorIcon::Text)
+                            .clicked()
+                    } else {
+                        let inner = ui.scope(|ui| markdown(ui, notes));
+                        ui.interact(inner.response.rect, ui.scope_id().with(("notes", &key)), Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::Text)
+                            .on_hover_text("Click to edit")
+                            .clicked()
+                    };
+                    if start_edit {
+                        *r.notes_edit = Some(NotesEdit { key: key.clone(), buf: notes.to_string(), focus: true });
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Lists").size(11.5).family(fonts::bold()).color(subtle()));
+                    for name in task_lists {
+                        list_tag(ui, name);
+                    }
+                    let add = ui
+                        .add(egui::Button::new(RichText::new("+ Add to list").size(12.0).color(blue())).frame(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    egui::Popup::menu(&add)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            if r.lists.is_empty() {
+                                ui.label(RichText::new("Create a list with + next to LISTS in the sidebar.").color(subtle()));
+                            } else if let Some(a) = list_toggles(ui, t, task_lists, r.lists) {
+                                out = Some(a);
+                            }
+                        });
+                });
+            }));
+    });
+    ui.add_space(6.0);
+    out
+}
+
+/// Renders a small subset of Markdown: headings, bullets, numbered and task lists,
+/// quotes, **bold**, *italic*, `code` and [links](url).
+fn markdown(ui: &mut egui::Ui, src: &str) {
+    ui.spacing_mut().item_spacing.y = 3.0;
+    let size = 13.5;
+    for raw in src.lines() {
+        let expanded = raw.replace('\t', "    ");
+        let line = expanded.trim_start();
+        let level = (expanded.len() - line.len()) / 2;
+        if line.is_empty() {
+            ui.add_space(4.0);
+            continue;
+        }
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
+            let hsize = [17.0, 15.5, 14.5, 14.0, 13.5, 13.5][hashes - 1];
+            ui.add(egui::Label::new(md_inline(line[hashes..].trim(), hsize, text(), true)).wrap());
+            continue;
+        }
+        enum Marker {
+            Bullet,
+            Check(bool),
+            Number(String),
+            Quote,
+        }
+        let num_len = line.chars().take_while(|c| c.is_ascii_digit()).count();
+        let (marker, rest) = if let Some(r) = ["- [ ] ", "* [ ] ", "+ [ ] "].iter().find_map(|p| line.strip_prefix(p)) {
+            (Some(Marker::Check(false)), r)
+        } else if let Some(r) = ["- [x] ", "* [x] ", "- [X] ", "* [X] "].iter().find_map(|p| line.strip_prefix(p)) {
+            (Some(Marker::Check(true)), r)
+        } else if let Some(r) = ["- ", "* ", "+ "].iter().find_map(|p| line.strip_prefix(p)) {
+            (Some(Marker::Bullet), r)
+        } else if num_len > 0 && (line[num_len..].starts_with(". ") || line[num_len..].starts_with(") ")) {
+            (Some(Marker::Number(line[..num_len + 1].to_string())), &line[num_len + 2..])
+        } else if let Some(r) = line.strip_prefix("> ") {
+            (Some(Marker::Quote), r)
+        } else {
+            (None, line)
+        };
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add_space(level as f32 * 16.0);
+            let color = if matches!(marker, Some(Marker::Quote) | Some(Marker::Check(true))) { subtle() } else { text() };
+            match &marker {
+                None => {}
+                Some(Marker::Bullet) => {
+                    let (rect, _) = ui.allocate_exact_size(vec2(10.0, size * 1.3), Sense::hover());
+                    let r = if level == 0 { 2.4 } else { 2.0 };
+                    let c = rect.center();
+                    if level % 2 == 0 {
+                        ui.painter().circle_filled(c, r, subtle());
+                    } else {
+                        ui.painter().circle_stroke(c, r, Stroke::new(1.0, subtle()));
+                    }
+                }
+                Some(Marker::Check(done)) => {
+                    let (rect, _) = ui.allocate_exact_size(vec2(12.0, size * 1.3), Sense::hover());
+                    let b = egui::Rect::from_center_size(rect.center(), vec2(11.0, 11.0));
+                    if *done {
+                        ui.painter().rect_filled(b, CornerRadius::same(3), subtle());
+                        let c = b.center();
+                        let pts = vec![c + vec2(-2.8, 0.2), c + vec2(-0.8, 2.3), c + vec2(3.0, -2.2)];
+                        ui.painter().add(egui::Shape::line(pts, Stroke::new(1.5, Color32::WHITE)));
+                    } else {
+                        ui.painter().rect_stroke(b, CornerRadius::same(3), Stroke::new(1.2, subtle()), egui::StrokeKind::Inside);
+                    }
+                }
+                Some(Marker::Number(n)) => {
+                    ui.label(RichText::new(n).size(size).color(subtle()));
+                }
+                Some(Marker::Quote) => {
+                    let (rect, _) = ui.allocate_exact_size(vec2(3.0, size * 1.3), Sense::hover());
+                    ui.painter().rect_filled(rect, CornerRadius::same(1), divider());
+                }
+            }
+            let mut job = md_inline(rest, size, color, false);
+            if matches!(marker, Some(Marker::Quote)) {
+                for s in &mut job.sections {
+                    s.format.italics = true;
+                }
+            }
+            if matches!(marker, Some(Marker::Check(true))) {
+                for s in &mut job.sections {
+                    s.format.strikethrough = Stroke::new(1.0, subtle());
+                }
+            }
+            ui.add(egui::Label::new(job).wrap());
+        });
+    }
+}
+
+/// Inline Markdown: **bold**, *italic*, `code`, [text](url).
+fn md_inline(s: &str, size: f32, color: Color32, bold_base: bool) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let (mut bold, mut italic, mut code) = (false, false, false);
+    let mut buf = String::new();
+    let push = |job: &mut egui::text::LayoutJob, buf: &mut String, bold: bool, italic: bool, code: bool, link: bool| {
+        if buf.is_empty() {
+            return;
+        }
+        let mut f = text_format(size, if link { blue() } else { color }, bold_base || bold);
+        f.italics = italic;
+        if code {
+            f.font_id = FontId::monospace(size * 0.92);
+            f.background = hover();
+        }
+        if link {
+            f.underline = Stroke::new(1.0, blue().gamma_multiply(0.5));
+        }
+        job.append(buf, 0.0, f);
+        buf.clear();
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            push(&mut job, &mut buf, bold, italic, code, false);
+            code = !code;
+            i += 1;
+            continue;
+        }
+        if !code {
+            if (c == '*' || c == '_') && chars.get(i + 1) == Some(&c) {
+                push(&mut job, &mut buf, bold, italic, code, false);
+                bold = !bold;
+                i += 2;
+                continue;
+            }
+            if c == '*' {
+                push(&mut job, &mut buf, bold, italic, code, false);
+                italic = !italic;
+                i += 1;
+                continue;
+            }
+            if c == '[' {
+                let rest: String = chars[i + 1..].iter().collect();
+                if let Some(close) = rest.find("](") {
+                    if let Some(end) = rest[close + 2..].find(')') {
+                        push(&mut job, &mut buf, bold, italic, code, false);
+                        buf.push_str(&rest[..close]);
+                        push(&mut job, &mut buf, bold, italic, code, true);
+                        i += 1 + rest[..close + 2 + end + 1].chars().count();
+                        continue;
+                    }
+                }
+            }
+        }
+        buf.push(c);
+        i += 1;
+    }
+    push(&mut job, &mut buf, bold, italic, code, false);
+    job
 }
 
 fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
@@ -1256,7 +1886,7 @@ fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
             ui.spacing_mut().item_spacing.y = 1.0;
             let title = RichText::new(&t.description).size(14.5).color(subtle()).strikethrough();
             let resp = ui
-                .add(egui::Label::new(title).sense(Sense::click()).truncate())
+                .add(egui::Label::new(title).sense(Sense::click()).wrap())
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!("Open in Obsidian\n{} / {} (line {})", t.vault, t.rel_path(), t.line + 1));
             if resp.clicked() {

@@ -10,6 +10,7 @@ static TASK_RE: LazyLock<Regex> =
 static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(📅|⏳|🛫|➕|✅|❌)️?\s*(\d{4}-\d{2}-\d{2})").unwrap()
 });
+static BLOCK_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s\^([A-Za-z0-9-]+)\s*$").unwrap());
 static RECUR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"🔁️?\s*([^📅⏳🛫➕✅❌🔺⏫🔼🔽⏬]*)").unwrap());
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -54,6 +55,8 @@ pub struct Task {
     pub completed: bool,
     /// Done date (`✅ YYYY-MM-DD`).
     pub done: Option<NaiveDate>,
+    /// Obsidian block ID (`^abc123` at the end of the line), used to attach app-only notes and lists.
+    pub block_id: Option<String>,
 }
 
 impl Task {
@@ -124,8 +127,11 @@ fn build_task(vault: &str, root: &Path, file: &Path, line_no: usize, line: &str)
         .map(|c| c[1].trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let block_id = BLOCK_ID_RE.captures(&body).map(|c| c[1].to_string());
+
     // Clean description: strip metadata emoji + values.
-    let mut desc = DATE_RE.replace_all(&body, "").to_string();
+    let mut desc = BLOCK_ID_RE.replace(&body, "").to_string();
+    desc = DATE_RE.replace_all(&desc, "").to_string();
     desc = RECUR_RE.replace_all(&desc, "").to_string();
     for p in ["🔺", "⏫", "🔼", "🔽", "⏬"] {
         desc = desc.replace(p, "");
@@ -150,6 +156,7 @@ fn build_task(vault: &str, root: &Path, file: &Path, line_no: usize, line: &str)
         in_progress: status == '/',
         completed,
         done,
+        block_id,
     })
 }
 
@@ -229,13 +236,8 @@ fn ymd(d: NaiveDate) -> String {
 pub fn complete_task(task: &Task) -> Result<(), String> {
     rewrite_line(task, |line| {
         let caps = TASK_RE.captures(line).ok_or("Line is no longer a task")?;
-        Ok(format!(
-            "{}x{}{} ✅ {}",
-            &caps[1],
-            &caps[3],
-            caps[4].trim_end(),
-            ymd(Local::now().date_naive())
-        ))
+        let line = format!("{}x{}{}", &caps[1], &caps[3], caps[4].trim_end());
+        Ok(insert_field(line, &format!("✅ {}", ymd(Local::now().date_naive()))))
     })
 }
 
@@ -255,18 +257,80 @@ static SCHED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*⏳\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
 static DUE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s*📅\uFE0F?\s*\d{4}-\d{2}-\d{2}").unwrap());
-static BLOCK_ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s\^[A-Za-z0-9-]+\s*$").unwrap());
-
 /// Removes one date field (matched by `re`) and, if `date` is set, re-adds it as
 /// `<emoji> YYYY-MM-DD` at the end of the line (before a trailing `^block-id`).
 fn replace_date_field(line: &str, re: &Regex, emoji: &str, date: Option<NaiveDate>) -> String {
     let l = re.replace_all(line, "").trim_end().to_string();
     let Some(d) = date else { return l };
-    let field = format!(" {emoji} {}", ymd(d));
-    match BLOCK_ID_RE.find(&l) {
-        Some(m) => format!("{}{}{}", &l[..m.start()], field, &l[m.start()..]),
-        None => l + &field,
+    insert_field(l, &format!("{emoji} {}", ymd(d)))
+}
+
+/// Appends a field at the end of the line, before a trailing `^block-id`.
+fn insert_field(line: String, field: &str) -> String {
+    let l = line.trim_end();
+    match BLOCK_ID_RE.find(l) {
+        Some(m) => format!("{} {}{}", &l[..m.start()], field, &l[m.start()..]),
+        None => format!("{l} {field}"),
     }
+}
+
+/// Matches any Tasks plugin metadata (dates, recurrence, priority) or a trailing block ID.
+static META_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:📅|⏳|🛫|➕|✅|❌)\uFE0F?\s*\d{4}-\d{2}-\d{2}|🔁\uFE0F?[^📅⏳🛫➕✅❌🔺⏫🔼🔽⏬^]*|[🔺⏫🔼🔽⏬]\uFE0F?|\s\^[A-Za-z0-9-]+\s*$").unwrap()
+});
+
+/// Builds a task body with new text, keeping all metadata. When the metadata all
+/// follows the text (the usual Tasks plugin layout) it is kept exactly as written;
+/// otherwise the metadata pieces are moved after the new text in their original order.
+fn rename_body(body: &str, new_text: &str) -> String {
+    let body = body.trim_end();
+    let Some(first) = META_RE.find(body) else { return new_text.to_string() };
+    let tail = &body[first.start()..];
+    let text_after_meta = META_RE.replace_all(tail, "");
+    if text_after_meta.trim().is_empty() {
+        return format!("{new_text} {}", tail.trim_start());
+    }
+    let pieces: Vec<&str> = META_RE.find_iter(body).map(|m| m.as_str().trim()).collect();
+    format!("{new_text} {}", pieces.join(" "))
+}
+
+/// Changes a task's text, keeping its checkbox, dates, priority, recurrence and block ID.
+pub fn rename_task(task: &Task, new_text: &str) -> Result<(), String> {
+    let new_text = new_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if new_text.is_empty() {
+        return Err("Task name can't be empty".into());
+    }
+    rewrite_line(task, |line| {
+        let caps = TASK_RE.captures(line).ok_or("Line is no longer a task")?;
+        Ok(format!("{}{}{}{}", &caps[1], &caps[2], &caps[3], rename_body(&caps[4], &new_text)))
+    })
+}
+
+/// A short random block ID, e.g. `vt-k3x9q2`.
+pub fn new_block_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut n = nanos ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut id = String::from("vt-");
+    for _ in 0..6 {
+        id.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize] as char);
+        n /= 36;
+    }
+    id
+}
+
+/// Returns the task's block ID, adding one (`^vt-xxxxxx`) to its line if it has none.
+pub fn ensure_block_id(task: &Task) -> Result<String, String> {
+    if let Some(id) = &task.block_id {
+        return Ok(id.clone());
+    }
+    let id = new_block_id();
+    rewrite_line(task, |line| Ok(format!("{} ^{id}", line.trim_end())))?;
+    Ok(id)
 }
 
 /// Sets or clears the Tasks plugin scheduled date (`⏳ YYYY-MM-DD`). Used for the Today list.
@@ -287,6 +351,7 @@ pub fn add_task(
     text: &str,
     due: Option<NaiveDate>,
     scheduled: Option<NaiveDate>,
+    block_id: Option<&str>,
 ) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
@@ -305,6 +370,9 @@ pub fn add_task(
     }
     if let Some(d) = due {
         line.push_str(&format!(" 📅 {}", ymd(d)));
+    }
+    if let Some(id) = block_id {
+        line.push_str(&format!(" ^{id}"));
     }
     content.push_str(&line);
     content.push('\n');
@@ -366,7 +434,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let today = Local::now().date_naive();
-        add_task(&dir, "New thing", parse_date("2026-12-01"), None).unwrap();
+        add_task(&dir, "New thing", parse_date("2026-12-01"), None, None).unwrap();
         let t = scan_vault(&dir, &[]).pop().unwrap();
         assert_eq!(t.description, "New thing");
         assert!(!t.starred(today));
@@ -394,5 +462,40 @@ mod tests {
         let t = build_task("V", Path::new("/v"), Path::new("/v/a.md"), 0, "- [ ] Water the plants 🔁 every week").unwrap();
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
         assert_eq!(t.description, "Water the plants");
+    }
+
+    #[test]
+    fn block_ids() {
+        let t = build_task("V", Path::new("/v"), Path::new("/v/a.md"), 0, "- [ ] Call Bob 📅 2026-07-15 ^vt-abc123").unwrap();
+        assert_eq!(t.description, "Call Bob");
+        assert_eq!(t.block_id.as_deref(), Some("vt-abc123"));
+        assert_eq!(insert_field("- [x] A ^id1".into(), "✅ 2026-01-02"), "- [x] A ✅ 2026-01-02 ^id1");
+        assert_ne!(new_block_id(), new_block_id());
+    }
+
+    #[test]
+    fn renames() {
+        assert_eq!(rename_body("Old name 📅 2026-07-15 ⏫ ^id1", "New"), "New 📅 2026-07-15 ⏫ ^id1");
+        assert_eq!(rename_body("Old name", "New"), "New");
+        assert_eq!(rename_body("Old 🔁 every week 📅 2026-01-01", "New"), "New 🔁 every week 📅 2026-01-01");
+        assert_eq!(rename_body("Old ⏫ more text 📅 2026-01-01", "New"), "New ⏫ 📅 2026-01-01");
+
+        let dir = std::env::temp_dir().join("vt-test3");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("n.md"), "- [ ] First #tag 📅 2026-01-01\n").unwrap();
+        let t = scan_vault(&dir, &[]).pop().unwrap();
+        rename_task(&t, "Second  #tag").unwrap();
+        let t = scan_vault(&dir, &[]).pop().unwrap();
+        let id = ensure_block_id(&t).unwrap();
+        let out = fs::read_to_string(dir.join("n.md")).unwrap();
+        assert_eq!(out, format!("- [ ] Second #tag 📅 2026-01-01 ^{id}\n"));
+        let t = scan_vault(&dir, &[]).pop().unwrap();
+        assert_eq!(t.block_id.as_deref(), Some(id.as_str()));
+        assert_eq!(ensure_block_id(&t).unwrap(), id);
+        complete_task(&t).unwrap();
+        let t = scan_vault(&dir, &[]).pop().unwrap();
+        assert!(t.completed);
+        assert_eq!(t.block_id.as_deref(), Some(id.as_str()));
     }
 }
