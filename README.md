@@ -1,48 +1,45 @@
+---
+title: README
+date created: 2026-11-09T18:44
+date modified: 2026-11-10T11:09
+---
 # Vault Tasks
-A small native macOS app that gathers every open task from your Obsidian vaults into one list. It's for people who keep tasks in Obsidian using the [Tasks plugin](https://github.com/obsidian-tasks-group/obsidian-tasks) format (`- [ ] Call Bob 📅 2026-11-15`). It reads and writes that same format, so your tasks stay in your notes and keep working in Obsidian.
+A small native macOS app that gathers every open task from your Obsidian vaults into one list. It's for people who keep tasks in Obsidian using the [Tasks plugin](https://github.com/obsidian-tasks-group/obsidian-tasks) format (`- [] Call Bob 📅 2026-11-15`). It reads and writes that same format, so your tasks stay in your notes and keep working in Obsidian.
 
-> **No prebuilt downloads.** The app isn't signed or notarized with an Apple Developer account, so there's no download to install. You build it from source on your own Mac, which takes a few minutes. The steps are below.
+> **No prebuilt downloads.** I don't have an Apple Developer account, so there's no download to install. You build it from source on your own Mac, which takes a few minutes. The steps are below.
 
-<!-- Screenshot: add one at docs/screenshot.png and remove this comment -->
 ![Vault Tasks](docs/screenshot.png)
 
 ## Features
 
-### Your tasks in one place
+### Your Tasks in One Place
+- Scans your obsidian vaults for tasks and brings them into the app. Refreshes are almost instant and update live as you write notes.
 - **All** groups open tasks by due date: Overdue, Today, Next 7 Days, Later and No Due Date.
 - **Starred** shows tasks you star. Starring sets the task's ⏳ scheduled date to today, so it also shows as scheduled in Obsidian.
 - **Completed** lists tasks done today, in the past 7 days or the past 30 days. Uncheck one to reopen it.
-- A view for each vault, plus Quick Find, which also searches notes.
+- A view for each vault, plus Quick Find.
 - Optionally group by file instead of by date.
-
-### Working with tasks
-- Check a task off to mark it done in its note (`[x]` and `✅ date`), with an optional chime and an Undo bar.
-- Click a task's name to rename it. Dates, priority, recurrence and tags stay on the line. Long names wrap.
-- Click the grey vault and file line under a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled, the note opens at the task's line.
-- Delete a task from its right-click menu, with Delete… in the action bar, or with Backspace. The app always asks first and shows which file and line will be removed; only that line is deleted.
-- Double-click a task's row (anywhere but its name) to open its notes and lists.
-- Click a date chip to set, change or remove a due date, with quick picks and a calendar (weeks start on Sunday).
-- Recurring tasks (`🔁 every week`) open in Obsidian when checked, so the Tasks plugin can create the next one.
-
-### Adding tasks
-- Type in the new task box and press Enter. Tasks go to `Vault Tasks.md` at the root of the chosen vault.
-- **Natural language dates:** a phrase at the start or end of the task sets the due date and is left out of the name. "Send report fri" becomes "Send report" due Friday. It understands today, tomorrow, weekday names, next week, next monday, in 3 days, in 2 weeks, nov 15 and 11/15. A date picked in the calendar wins.
-- **Quick capture:** press Ctrl+Option+Space anywhere on your Mac to open a small window, type a task and press Enter. It's added to `Vault Tasks.md`, the same note as tasks added in the app, in the vault you pick in Settings. The note and shortcut can be changed. It works even when the app is hidden or minimized.
-
-### Notes and lists
-- **Notes:** click the ≡ button on a task to add notes. Markdown works: bullets, checkboxes, **bold**, *italic*, `code`, headings and links.
-- **Lists:** make your own lists under LISTS in the sidebar. Add tasks by dragging them onto a list, from a task's notes panel, by right-clicking a task, or with Move to list. Right-click a list to rename or delete it.
-- Notes and lists are saved in `.vault-tasks.json` at each vault's root, so they sync with your vault and don't clutter your notes. The first time a task gets notes or a list, the app adds an Obsidian block ID (`^vt-abc123`) to the end of its line so it can find the task again after edits.
-
-### Editing many tasks at once
-- Cmd-click to add or remove a task from the selection, Shift-click to select a range, Cmd-A to select everything shown, Esc to clear.
-- While tasks are selected, an action bar offers Today, Tomorrow, Next week, a date picker, Move to list and Complete.
-- "Reschedule all to today" on the Overdue heading.
-- If a note can't be written, the others still update and the app tells you which tasks didn't.
-
-### Look and feel
 - Light and dark themes, or match macOS.
 - Choice of font and text size, a native menu bar and keyboard shortcuts.
+
+### Working with Tasks
+- Check a task off to mark it done in its note (`[x]` and `✅ date`)
+- Click a task's name to rename it. Updating it here will update it in the correct MD file. Dates, priority, tags stay on the line.
+- Click the grey text that shows the file under a task to open its note in Obsidian. With the free [Advanced URI](https://github.com/Vinzent03/obsidian-advanced-uri) plugin enabled, the note opens at the task's line.
+- Delete a task from this app to remove the line in obsidian.
+- Double-click a task's row (anywhere but its name) to add additional notes.
+- Quickly change due dates from this app, with changes updating in your notes immediately.
+- Edit multiple tasks at once. Cmd-click to add or remove a task from the selection, Shift-click to select a range, Cmd-A to select everything shown, Esc to clear.
+
+### Adding Tasks
+- Type in the new task box and press Enter. Tasks go to `Vault Tasks.md` at the root of the chosen vault.
+- **Natural language dates:** a phrase at the start or end of the task sets the due date and is left out of the name. "Send report fri" becomes "Send report" due Friday. It understands today, tomorrow, weekday names, next week, next monday, in 3 days, in 2 weeks, nov 15 and 11/15.
+- **Quick capture:** press Ctrl+Option+Space anywhere on your Mac to open a small window, type a task and press Enter. It's added to `Vault Tasks.md`, the same note as tasks added in the app, in the vault you pick in Settings. The note and shortcut can be changed. It works even when the app is hidden or minimized.
+
+### Notes and Lists
+- **Notes:** click the ≡ button on a task to add notes. Markdown works: bullets, checkboxes, **bold**, _italic_, `code`, headings and links.
+- **Lists:** make your own lists under Lists in the sidebar. Add tasks by dragging them onto a list, from a task's notes panel, by right-clicking a task, or with Move to list.
+- Notes and lists are saved in `.vault-tasks.json` at each vault's root, so they sync with your vault and don't clutter your notes. The first time a task gets notes or a list, the app adds an Obsidian block ID (`^vt-abc123`) to the end of its line so it can find the task again after edits.
 
 ## Requirements
 - A Mac running macOS 11 or later (Apple Silicon or Intel).
@@ -55,22 +52,22 @@ These steps assume you haven't used Rust before. Run each command in the Termina
 ```bash
 xcode-select --install
 ```
-2. Install Rust with rustup. Accept the default options when it asks, then close and reopen Terminal.
+1. Install Rust with rustup. Accept the default options when it asks, then close and reopen Terminal.
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
-3. Download the source code. Replace the address with this repository's URL.
+1. Download the source code. Replace the address with this repository's URL.
 ```bash
-git clone https://github.com/OWNER/vault-tasks.git
+git clone https://github.com/thomaspeterson2/vault-tasks.git
 ```
 ```bash
 cd vault-tasks
 ```
-4. Build it. The first build downloads libraries and takes a few minutes.
+1. Build it. The first build downloads libraries and takes a few minutes.
 ```bash
 cargo build --release
 ```
-5. Run it.
+1. Run it.
 ```bash
 ./target/release/vault-tasks
 ```
@@ -88,7 +85,7 @@ Because you built the app on your own Mac, macOS opens it without the "unidentif
 1. Open the app. It looks for vaults in Obsidian's iCloud folder (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents`).
 2. If your vaults are somewhere else, or none were found, open **Settings** (⌘,) and click **Add vault folder…** for each vault.
 3. Optional: under **Excluded folders**, add folders to skip, such as templates or recipes.
-4. Under **Quick capture**, pick the vault and note that captured tasks go to. The default is `Vault Tasks.md` in your first vault, the same note tasks added in the app go to. It's created the first time you add a task. You can also change the shortcut there, written like `ctrl+option+space` or `cmd+shift+k`. macOS doesn't need any extra permission for it. If another app already uses the shortcut, Settings says so.
+4. Under **Quick capture**, pick the vault and note that captured tasks go to. The default is `Vault Tasks.md` in your first vault, the same note tasks added in the app go to. It's created the first time you add a task. You can also change the shortcut there, written like `ctrl+option+space` or `cmd+shift+k`. macOS doesn't need any extra permission for it. If another app already uses the shortcut, the Settings page will let you know.
 5. Optional: Settings shows whether the Tasks and Advanced URI plugins are installed in each vault.
 
 Settings are saved to `~/Library/Application Support/vault-tasks/config.json`.
@@ -108,7 +105,7 @@ These Tasks plugin markers are understood:
 - `🔁 every week` recurrence
 - `^block-id` an Obsidian block ID, which the app uses to attach notes and lists
 
-`[ ]` is open, `[/]` is in progress and `[x]` is done. Other statuses, tasks in code blocks and hidden folders such as `.obsidian` are skipped.
+`[]` is open, `[/]` is in progress and `[x]` is done. Other statuses, tasks in code blocks and hidden folders such as `.obsidian` are skipped.
 
 When the app changes a task it only edits that task's line and keeps everything else on it. It re-reads the note right before writing, and if the line changed since the last scan it stops and asks you to refresh, so it won't overwrite an edit you made in Obsidian.
 
