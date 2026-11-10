@@ -6,7 +6,7 @@ date modified: 2026-11-10T11:09
 # Vault Tasks
 A small native macOS app that gathers every open task from your Obsidian vaults into one list. It's for people who keep tasks in Obsidian using the [Tasks plugin](https://github.com/obsidian-tasks-group/obsidian-tasks) format (`- [] Call Bob 📅 2026-11-15`). It reads and writes that same format, so your tasks stay in your notes and keep working in Obsidian.
 
-> **No prebuilt downloads.** I don't have an Apple Developer account, so there's no download to install. You build it from source on your own Mac, which takes a few minutes. The steps are below.
+> **Two ways to install.** I don't have an Apple Developer account, so the app isn't signed. You can download the app and approve it once in System Settings, or build it from source on your own Mac, which takes a few minutes and skips the warning. Both are covered under [Install](#install).
 
 ![Vault Tasks](docs/screenshot.png)
 
@@ -43,10 +43,21 @@ A small native macOS app that gathers every open task from your Obsidian vaults 
 
 ## Requirements
 - A Mac running macOS 11 or later (Apple Silicon or Intel).
-- The Rust toolchain, installed with rustup (steps below).
 - Obsidian, with tasks written in the Tasks plugin format. The Tasks plugin itself is recommended so recurring tasks work, but the app reads and writes the format without it.
+- To build from source only: the Rust toolchain, installed with rustup (steps below).
 
-## Build and Run
+## Install
+Pick one. Downloading is quicker. Building from source takes a few minutes, but macOS opens the app without any warning.
+
+### Option 1: Download the App
+1. Go to [Releases](https://github.com/thomaspeterson2/vault-tasks/releases/latest) and download **Vault-Tasks-*-macOS.zip**, then unzip it.
+2. Drag **Vault Tasks.app** into your Applications folder.
+3. Open it. Because I don't have an Apple Developer account, the app isn't signed, so macOS says it can't verify the developer.
+4. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to Vault Tasks. You only need to do this once.
+
+To update, download the newest release and replace the app in Applications.
+
+### Option 2: Build from Source
 These steps assume you haven't used Rust before. Run each command in the Terminal app.
 1. Install the Xcode command line tools, which Rust needs to build Mac apps. Skip this if you already have them.
 ```bash
@@ -72,7 +83,7 @@ cargo build --release
 ./target/release/vault-tasks
 ```
 
-### Put It in Applications
+#### Put It in Applications
 To get a proper app with an icon that you can open from Launchpad or Spotlight, build the app bundle and install it into `~/Applications`:
 ```bash
 ./bundle.sh --install
@@ -119,11 +130,8 @@ When the app changes a task it only edits that task's line and keeps everything 
 - Cmd-A selects all tasks shown, Esc clears the selection
 - Ctrl+Option+Space quick capture, from any app
 
-## Custom Chime Sounds
-The chime picker lists the macOS system sounds plus anything in `~/Library/Sounds`. Drop `.aiff`, `.wav`, `.mp3`, `.m4a` or `.caf` files there (Settings has an **Open folder** button). Short clips under one second work best. To convert a recording:
-```bash
-afconvert -f AIFF -d BEI16 input.m4a ~/Library/Sounds/MyDing.aiff
-```
+## Sounds
+A bell plays when you complete a task and a ding when you star one. The sounds are built into the app. Turn them off under **Settings → Sound**.
 
 ## Development
 ```bash

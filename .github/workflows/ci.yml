@@ -1,5 +1,5 @@
 # Builds and tests the app on every push and pull request.
-# There are no prebuilt downloads: the app isn't signed, so people build it from source.
+# Release downloads are built locally with ./bundle.sh --universal --zip and attached by hand.
 name: CI
 
 on:
