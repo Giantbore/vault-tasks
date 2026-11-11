@@ -54,6 +54,8 @@ pub fn field_bg() -> Color32 { pick(rgb(248, 248, 250), rgb(34, 34, 38)) }
 pub fn field_stroke() -> Color32 { pick(rgb(230, 230, 234), rgb(54, 54, 60)) }
 pub fn selected() -> Color32 { pick(rgb(222, 222, 227), rgb(58, 58, 65)) }
 pub fn hover() -> Color32 { pick(rgb(233, 233, 237), rgb(46, 46, 52)) }
+/// Border of task checkboxes.
+pub fn checkbox_border() -> Color32 { pick(rgb(200, 200, 206), rgb(84, 84, 92)) }
 pub fn divider() -> Color32 { pick(rgb(222, 222, 228), rgb(58, 58, 64)) }
 /// Line under group headings.
 pub fn rule() -> Color32 { pick(rgb(228, 228, 232), rgb(48, 48, 54)) }

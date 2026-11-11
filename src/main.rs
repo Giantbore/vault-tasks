@@ -2110,6 +2110,20 @@ struct RowUi<'a> {
     click: &'a mut Option<RowClick>,
 }
 
+/// A task's checkbox: a white box with a thin border, so it stays visible on the
+/// grey and blue row highlights (egui's default grey fill matches the cursor row).
+fn task_checkbox(ui: &mut egui::Ui, checked: &mut bool) -> egui::Response {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.bg_fill = main_bg();
+        w.inactive.bg_stroke = egui::Stroke::new(1.0, checkbox_border());
+        w.hovered.bg_fill = main_bg();
+        w.hovered.bg_stroke = egui::Stroke::new(1.0, subtle());
+        ui.checkbox(checked, "")
+    })
+    .inner
+}
+
 fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &mut RowUi) -> Option<Action> {
     let mut action = None;
     let starred = t.starred(today);
@@ -2157,7 +2171,7 @@ fn task_row(ui: &mut egui::Ui, t: &Task, today: NaiveDate, show_file: bool, r: &
     ui.add_space(3.0);
     let row = ui.horizontal_top(|ui| {
         let mut checked = false;
-        let cb = ui.checkbox(&mut checked, "");
+        let cb = task_checkbox(ui, &mut checked);
         if t.recurrence.is_some() {
             if cb.on_hover_text("Recurring task: opens in Obsidian so the Tasks plugin can create the next one").clicked() {
                 action = Some(Action::Open(t.clone()));
@@ -2741,7 +2755,7 @@ fn completed_row(ui: &mut egui::Ui, t: &Task) -> Option<Action> {
     ui.horizontal(|ui| {
         ui.set_min_height(36.0);
         let mut checked = true;
-        let cb = ui.checkbox(&mut checked, "");
+        let cb = task_checkbox(ui, &mut checked);
         if t.recurrence.is_some() {
             if cb.on_hover_text("Recurring task: opens in Obsidian, since the Tasks plugin already created the next one").clicked() {
                 action = Some(Action::Open(t.clone()));
